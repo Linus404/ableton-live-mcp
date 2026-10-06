@@ -95,6 +95,39 @@ def make_server(client: AbletonBridgeClient | None = None) -> StdioMcpServer:
     timeout_control = {"timeout": {"type": "number"}}
     server.add_tool(Tool("live_ping", "Bridge health.", schema(timeout_control), forward("ping")))
     server.add_tool(Tool("live_bridge_status", "Socket-thread status; no Live API/main-thread scheduling.", schema(timeout_control), forward("bridge_status")))
+
+    def live_undo(args):
+        # Safety net for agent mutations: roll back (or forward) N steps of Live's
+        # undo history. Checkpoint pattern: count your own mutations, then undo
+        # that many steps and verify with live_set_summary — user edits made in
+        # the Live GUI interleave into the same history, so step counts are a
+        # contract with the user, not a guarantee.
+        params = dict(args or {})
+        steps = int(params.get("steps") or 1)
+        if steps < 1:
+            raise ValueError("steps must be >= 1")
+        redo = bool(params.get("redo"))
+        can_expr = "song.can_redo" if redo else "song.can_undo"
+        act_code = "song.redo()\nresult = True" if redo else "song.undo()\nresult = True"
+        performed = 0
+        for _ in range(steps):
+            if not bridge.request("eval", {"expr": can_expr}):
+                break
+            bridge.request("exec", {"code": act_code})
+            performed += 1
+        return {
+            "action": "redo" if redo else "undo",
+            "requested": steps,
+            "performed": performed,
+            "exhausted": performed < steps,
+            "can_undo": bool(bridge.request("eval", {"expr": "song.can_undo"})),
+            "can_redo": bool(bridge.request("eval", {"expr": "song.can_redo"})),
+        }
+
+    server.add_tool(Tool("live_undo", "Undo/redo N history steps (mutation safety net). Count your own mutations, roll back that many, verify with live_set_summary; GUI edits interleave. Returns performed/exhausted/can_undo/can_redo.", schema({
+        "steps": {"type": "integer", "minimum": 1, "description": "History steps to move (default 1)."},
+        "redo": {"type": "boolean", "description": "Move forward (redo) instead of back."},
+    }), live_undo))
     response_controls = {
         "detail": {"type": "boolean"},
         "max_items": {"type": "integer"},
