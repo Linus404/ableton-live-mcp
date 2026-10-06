@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import io
 import json
 import os
 import socket
 import sqlite3
+import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -96,6 +99,43 @@ def test_add_tool_rejects_non_object_input_schema():
     server = make_server(FakeBridge())
     with pytest.raises(ValueError):
         server.add_tool(Tool("bad_tool", "desc", {}, lambda args: None))
+
+
+def test_serve_survives_malformed_stdin_line():
+    # One stray non-JSON line on stdin must not kill the process: the server
+    # would exit and every tool silently vanishes from the client. JSON-RPC
+    # reserves -32700 with a null id for parse errors.
+    server = make_server(FakeBridge())
+    stdin = io.StringIO('this is not json {{{\n{"jsonrpc": "2.0", "id": 1, "method": "tools/list"}\n')
+    stdout = io.StringIO()
+    server.serve(stdin, stdout)
+    responses = [json.loads(line) for line in stdout.getvalue().splitlines()]
+    assert responses[0]["id"] is None
+    assert responses[0]["error"]["code"] == -32700
+    assert responses[1]["result"]["tools"]
+
+
+def test_main_stdio_is_utf8_with_lf_framing():
+    # Windows pipes default to the locale code page (cp1252), which corrupts
+    # non-ASCII track/clip names crossing stdio and frames lines as \r\n.
+    # Drive the real entry point over pipes: a UTF-8 tool name must round-trip
+    # into the error message, and response lines must end in bare \n.
+    request = (
+        '{"jsonrpc": "2.0", "id": 1, "method": "tools/call",'
+        ' "params": {"name": "spår_åäö", "arguments": {}}}\n'
+    )
+    proc = subprocess.run(
+        [sys.executable, "-c", "import server; server.main()"],
+        input=request.encode("utf-8"),
+        capture_output=True,
+        timeout=60,
+        cwd=str(Path(__file__).resolve().parents[1]),
+        env={**os.environ, "PYTHONPATH": "src"},
+    )
+    assert proc.stdout, proc.stderr.decode("utf-8", "replace")
+    assert b"\r\n" not in proc.stdout
+    response = json.loads(proc.stdout.decode("utf-8"))
+    assert response["error"]["message"] == "Unknown tool: spår_åäö"
 
 
 def test_initialize_reports_current_server_version():

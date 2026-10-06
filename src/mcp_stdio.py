@@ -54,7 +54,19 @@ class StdioMcpServer:
         for line in in_stream:
             if not line.strip():
                 continue
-            response = self.handle(json.loads(line))
+            try:
+                request = json.loads(line)
+            except ValueError as exc:
+                # A malformed line must not kill the server: the process would
+                # exit and every tool silently vanishes from the client.
+                # JSON-RPC reserves -32700 with a null id for parse errors.
+                response: Json | None = {
+                    "jsonrpc": "2.0",
+                    "id": None,
+                    "error": {"code": -32700, "message": f"Parse error: {exc}"},
+                }
+            else:
+                response = self.handle(request)
             if response is not None:
                 out_stream.write(json.dumps(response, separators=(",", ":")) + "\n")
                 out_stream.flush()

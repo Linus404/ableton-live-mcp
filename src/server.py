@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import hashlib
 import socket
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -1490,6 +1491,14 @@ def _agent_m4l_reload_seen(status: dict[str, Any], command_id: str, expected_eve
 
 
 def main() -> None:
+    # On Windows, piped stdio defaults to the locale code page (e.g. cp1252),
+    # which corrupts every non-ASCII track/clip/device name crossing the MCP
+    # boundary, and text-mode stdout frames lines as \r\n. MCP stdio is UTF-8
+    # newline-delimited JSON on every platform.
+    if hasattr(sys.stdin, "reconfigure"):
+        sys.stdin.reconfigure(encoding="utf-8")
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", newline="\n")
     make_server().serve()
 
 
