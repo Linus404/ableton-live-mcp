@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 
 import agent_m4l
-from agent_m4l import audio_bus_names, build_amxd, build_pool, command_file, infer_device_height, infer_device_width, inject_webui_bootstrap, make_host_patch, replace_ptch_chunk, status_file, udp_port, write_webui
+from agent_m4l import audio_bus_names, build_amxd, build_pool, command_file, infer_device_height, infer_device_width, inject_webui_bootstrap, make_host_patch, max_arg, replace_ptch_chunk, status_file, udp_port, write_webui
 
 
 def test_agent_m4l_host_patch_contains_runtime_and_role_io():
@@ -13,7 +13,7 @@ def test_agent_m4l_host_patch_contains_runtime_and_role_io():
     lines = patch["patcher"]["lines"]
     texts = {box["box"].get("text") for box in boxes}
     boxes_by_id = {box["box"].get("id"): box["box"] for box in boxes}
-    assert "js agent_m4l_host.js instrument Lead %s %s" % (command_file("Lead"), status_file("Lead")) in texts
+    assert "js agent_m4l_host.js instrument Lead %s %s" % (max_arg(command_file("Lead")), max_arg(status_file("Lead"))) in texts
     assert not any(str(text or "").startswith("print AgentM4L_") for text in texts)
     assert "midiin" in texts
     assert "prepend __midi_wake" in texts
@@ -36,9 +36,9 @@ def test_agent_m4l_host_patch_contains_runtime_and_role_io():
     assert "live.path this_device parameters 1" in texts
     assert "live.observer value" in texts
     assert "prepend __command_trigger" in texts
-    assert "filewatch %s" % command_file("Lead") in texts
+    assert "filewatch %s" % max_arg(command_file("Lead")) in texts
     assert "trigger b b" in texts
-    assert command_file("Lead") in texts
+    assert max_arg(command_file("Lead")) in texts
     assert "prepend __filewatch" in texts
     assert "deferlow" in texts
     assert "delay 100" in texts
