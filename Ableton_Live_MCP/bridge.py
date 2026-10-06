@@ -1154,6 +1154,14 @@ class AbletonLiveMCP(ControlSurface):
         if limit >= 0 and len(notes) > limit:
             notes = notes[:limit]
             truncated = True
+        # The generic response encoder caps list length with its own max_items and
+        # would append a {"truncated": ...} marker dict INSIDE the notes array,
+        # silently overriding this RPC's own limit (a 2000-note request came back
+        # with 200 notes + a marker). clip_notes already reports note_count +
+        # truncated at the top level, so raise the encoder ceiling to cover the
+        # requested limit unless the caller set max_items explicitly.
+        if params.get("max_items") is None:
+            params["max_items"] = -1 if limit < 0 else max(limit + 8, 256)
         return {
             "clip": self._clip_summary(clip, None),
             "note_api": "extended",

@@ -1434,6 +1434,39 @@ def test_clip_notes_can_be_listed_and_updated(monkeypatch):
     assert notes["notes"][0]["velocity"] == 88.0
 
 
+def test_clip_notes_limit_overrides_encoder_max_items(monkeypatch):
+    # A clip_notes limit above DEFAULT_MAX_ITEMS must win over the generic
+    # response encoder: previously a 2000-note request came back with the notes
+    # array cut at 200 and a {"truncated": true, "omitted": N} marker dict
+    # appended INSIDE the array (field-hit 2026-08-08 reading a 286-note clip).
+    bridge, song, _app = make_bridge(monkeypatch)
+    clip = song.tracks[0].clip_slots[0].clip
+    clip._notes = [
+        types.SimpleNamespace(
+            note_id=i, pitch=60 + (i % 12), start_time=float(i) * 0.25,
+            duration=0.25, velocity=64.0, mute=False, probability=1.0,
+            velocity_deviation=0.0, release_velocity=64.0,
+        )
+        for i in range(300)
+    ]
+    result = bridge._run_on_main("clip_notes", {
+        "ref": {"path": "live_set tracks 0 clip_slots 0 clip"},
+        "limit": 2000,
+    })
+    assert result["note_count"] == 300
+    assert result["truncated"] is False
+    assert len(result["notes"]) == 300
+    assert all("pitch" in note for note in result["notes"])  # no marker dict inside
+    # An explicit caller max_items still wins over the RPC default.
+    result = bridge._run_on_main("clip_notes", {
+        "ref": {"path": "live_set tracks 0 clip_slots 0 clip"},
+        "limit": 2000,
+        "max_items": 5,
+    })
+    assert len(result["notes"]) == 6  # 5 notes + the encoder's marker
+    assert result["notes"][-1] == {"truncated": True, "omitted": 295}
+
+
 def test_clip_notes_refuses_legacy_note_api(monkeypatch):
     bridge, _song, _app = make_bridge(monkeypatch)
     monkeypatch.delattr(FakeClip, "get_all_notes_extended")
