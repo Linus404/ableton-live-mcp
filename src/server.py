@@ -308,6 +308,11 @@ def make_server(client: AbletonBridgeClient | None = None) -> StdioMcpServer:
     }, ["ref", "device_name"]), forward("track_insert_device")))
     server.add_tool(Tool("live_agent_audio_tap", AGENT_AUDIO_TAP_DESCRIPTION, AGENT_AUDIO_TAP_SCHEMA, forward("agent_audio_tap")))
     server.add_tool(Tool("live_agent_audio_tap_setup", AGENT_AUDIO_TAP_SETUP_DESCRIPTION, loose_schema(), forward("agent_audio_tap_setup")))
+    def live_audio_capture(args):
+        from audio_capture import capture_audio
+        return capture_audio(bridge, args)
+
+    server.add_tool(Tool("live_audio_capture", "Capture; see AGENTS.md.", loose_schema(), live_audio_capture))
     server.add_tool(Tool("live_visual_capture", VISUAL_CAPTURE_DESCRIPTION, loose_schema(), lambda args: capture_ableton_window(
         output_path=args.get("output_path"),
         title_contains=args.get("title_contains"),

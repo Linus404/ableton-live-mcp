@@ -58,6 +58,10 @@ When the bridge socket still responds but Live's main thread does not execute sc
 
 When validation reports `live_failure_type: "bridge_unresponsive"` or `"live_process_unresponsive"`, even the socket-thread `live_bridge_status` probe timed out. Do not keep probing or retry with longer Live API calls; preserve diagnostics, use Ableton-only visual capture or an OS process sample if the display/session allows it, and recover/restart/reload Live only with user authorization.
 
+## Engineering principles
+
+Follow KISS, DRY, YAGNI, SoC, SRP, and PIE in implementation and review. Prefer the simplest working solution, reuse existing logic, avoid speculative features and abstractions, separate concerns, and give each component one clear responsibility. Apply these principles pragmatically; do not introduce extra layers merely to satisfy them.
+
 ## Repository operations
 
 Never push commits, branches, or tags to a remote without explicit user authorization.
@@ -86,6 +90,39 @@ Each `AgentAudioTap` command must have a unique command id. Let the MCP generate
 For validation captures, call `live_agent_audio_tap` with a `command` field. Prefer one atomic `{"command": "start", "path": "..."}` command, then a later `{"command": "stop"}`. Avoid separate `open` then `start` command-file writes unless you also add an acknowledgement wait; otherwise the tap can poll only the later `start` and Max may log `sfrecord~: start requested without preceding open`.
 
 Before using AgentAudioTap WAVs as pass/fail evidence, sanity-check the measurement path by changing the target track volume or solo/mute state and confirming the capture or Live meters respond. After `live_agent_audio_tap_setup` with `solo_track`, explicitly read the involved tracks and verify the requested target is soloed and non-targets are not contributing; do not treat the setup response alone as isolation evidence. If a capture ignores an obvious source change, rebuild/reload the tap and use Live's `output_meter_left/right` as the validation signal until the tap path is trustworthy again.
+
+## Multi-track passage capture
+
+Use `live_audio_capture` for one real-time Arrangement pass across audio-capable
+tracks, groups, returns, and master. `start_beat: 0, length_beats: 32` means eight
+4/4 bars from 1.1.1. Pre-roll is earlier playback context clamped to zero;
+post-roll is continued musical context, not isolated decay. Preserve routing,
+mute/solo states, and clips; reject recording, automation writing, and Session
+overrides. Frozen targets must have explicit unsupported outcomes.
+
+Arguments: required `start_beat` (nonnegative) and `length_beats` (positive);
+optional `track_refs` (regular/group Live refs), `include_returns` and
+`include_master` (both default true), `pre_roll_beats` and `post_roll_beats`
+(default zero), `max_duration_seconds` (default 120, maximum 600), and
+`output_directory` (default discovered state directory's `audio_captures`).
+Only `precision: "approximate"` is supported; `sample_aligned: true` is rejected.
+The duration limit includes recorder startup and must allow the passage plus
+startup overhead. Tap identities are stable within a Live session; reuse fails
+closed if an existing tap is no longer enabled at the end of its chain.
+
+The first capture mode retains raw untrimmed WAVs. Matching command acknowledgements
+are control evidence only, not recorder readiness or timing calibration. Do not
+claim sample alignment, exact passage trimming, post-mixer stems, or final-master
+delivery measurements. End-of-device-chain captures overlap at groups/returns/master
+and must not be blindly summed. Validate WAV completion outside Live, retain an
+incomplete manifest on failure, and stop each owned recorder even after partial
+setup. A local recorder duration bound is required independently of MCP polling.
+
+Before Live validation, install changed Remote Script and tap companions; ask
+before Control Surface reload/restart or destructive disposable-set experiments.
+Require current/safe runtime and sequential Live calls. Establish signal-point,
+pass-through, headroom, first-sample, and latency/timing behavior experimentally
+before using captures as precision measurement evidence.
 
 ## Visual validation captures
 

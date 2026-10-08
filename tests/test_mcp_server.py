@@ -3105,7 +3105,7 @@ def test_remote_script_status_detects_stale_install(tmp_path):
     assert current["current"] is True
     assert len(current["source_bridge_sha256"]) == 64
     assert current["target_bridge_sha256"] == current["source_bridge_sha256"]
-    assert current["source_runtime_version"] == "transport-stop-settle-1"
+    assert current["source_runtime_version"] == "audio-capture-2"
     assert current["target_runtime_version"] == current["source_runtime_version"]
     assert len(current["source_runtime_code_sha256"]) == 64
     assert current["target_runtime_code_sha256"] == current["source_runtime_code_sha256"]
