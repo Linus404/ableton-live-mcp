@@ -124,6 +124,28 @@ Require current/safe runtime and sequential Live calls. Establish signal-point,
 pass-through, headroom, first-sample, and latency/timing behavior experimentally
 before using captures as precision measurement evidence.
 
+## Loudness and balance analysis
+
+Use `live_audio_analyze` on existing audio: exactly one of `path` (mono/stereo WAV)
+or `manifest_path` (from `live_audio_capture`). Install the optional backend with
+`python -m pip install -e ".[audio-analysis]"`. Analysis is offline and never calls
+Live. Optional `sections` are `{name, start_seconds, end_seconds}` in each file's
+time coordinates, not beats/Arrangement positions; `window_step_seconds` sets
+local sampling, capped at 120 windows/file. Bounds: 32 sections, 64 entries,
+600 seconds and 12 million scalar samples/file, 96 million samples/request.
+
+Integrated LUFS uses BS.1770 K-weighting and absolute/relative gating; momentary
+(400 ms) and short-term (3 s) windows are ungated. RMS dBFS is unweighted with
+unit RMS as 0 dBFS; sample peak is not true peak. LRA is explicitly unsupported.
+Null values carry insufficient-duration/silence conditions. Level changes are
+observations, not evidence that an intentional section contrast is a problem.
+
+Preserve capture provenance and per-entry failures. Pre-mixer tap measurements
+do not establish post-fader balance, final-delivery loudness, in-mix prominence,
+or masking. Do not compare supposedly corresponding local windows across raw
+captures: recorder timing/alignment remains unverified. The analyzer returns
+part-to-master comparison as unavailable instead of inventing aligned evidence.
+
 ## Visual validation captures
 
 For M4L UI visual validation, use `live_visual_capture` or `ableton-live-mcp-capture-window` to capture only Ableton Live windows. This tool is never a general screenshot API: do not add arguments or workflows that capture arbitrary apps, monitors, desktops, browser windows, terminals, or user-selected window handles. The implementation must enumerate candidate OS windows, filter them to verified Ableton Live processes first, and only then apply optional title filters.

@@ -105,6 +105,53 @@ Local regression tests do not establish Live recording, headroom, pass-through,
 or timing accuracy. Those require a current-runtime Live experiment with known
 sources and latency-bearing paths before stronger measurement claims.
 
+### Loudness and balance evidence
+
+Install the optional numerical analysis backend:
+
+```sh
+python -m pip install -e ".[audio-analysis]"
+```
+
+`live_audio_analyze` analyzes an existing mono/stereo WAV or the manifest returned
+by `live_audio_capture`, without contacting or changing Live:
+
+```json
+{"manifest_path": "<capture result's manifest_path>"}
+```
+
+For a standalone WAV, named sections use **file-relative seconds**:
+
+```json
+{"path": "C:/audio/mix.wav", "sections": [{"name": "verse", "start_seconds": 0, "end_seconds": 16}, {"name": "chorus", "start_seconds": 16, "end_seconds": 32}]}
+```
+
+The compact report contains gated integrated LUFS for each file and section,
+ungated trailing 400 ms momentary and 3 s short-term LUFS, unweighted RMS dBFS,
+sample peaks dBFS, and descriptive local level changes with timestamps. Silence
+and unavailable measurements are JSON `null` with status/conditions. No universal
+loudness target or musical-quality score is imposed. Loudness range (LRA) and
+true peak are not implemented.
+
+Integrated loudness uses complete overlapping 400 ms blocks with 100 ms hops;
+any incomplete final gating block is excluded. RMS, sample peak, duration, and
+local windows retain the original file or section interval.
+
+Exactly one of `path` or `manifest_path` is required. Optional
+`window_step_seconds` controls local sampling; at most 120 windows are returned
+per file. Limits are 32 sections, 64 manifest entries, 600 seconds and 12 million
+scalar samples per file, and 96 million scalar samples per request. At 48 kHz
+stereo the per-file sample bound permits 125 seconds. Longer audio must be
+supplied as shorter files. Failed/incomplete/unsupported entries remain explicit.
+
+These are **signal-point level measurements**, not proof of perceived prominence
+or masking. Raw capture files have uncalibrated starts and stops; the analyzer
+preserves that provenance and does not invent synchronized part-to-master
+comparisons or map file times to Arrangement sections. Analyze known, aligned
+rendered passages separately when assessing their measured levels; pre-mixer
+tap values cannot establish actual fader balance. Captured groups, returns, and
+master paths are never summed.
+
 ## Ideas
 
 - Control your external synthesizers and other hardware with the MCP
