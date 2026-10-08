@@ -313,6 +313,20 @@ def make_server(client: AbletonBridgeClient | None = None) -> StdioMcpServer:
         return capture_audio(bridge, args)
 
     server.add_tool(Tool("live_audio_capture", "Capture; see AGENTS.md.", loose_schema(), live_audio_capture))
+    def live_audio_analyze(args):
+        from audio_analysis import analyze_audio
+        return analyze_audio(args)
+
+    server.add_tool(Tool("live_audio_analyze", "Offline WAV/capture loudness: gated LUFS, local levels, sections. File-relative seconds; pre-mixer levels are not in-mix audibility. Requires audio-analysis extra; see AGENTS.md.", schema({
+        "path": {"type": "string", "description": "Local mono/stereo WAV; choose path or manifest_path."},
+        "manifest_path": {"type": "string", "description": "Manifest from live_audio_capture."},
+        "sections": {"type": "array", "maxItems": 32, "items": schema({
+            "name": {"type": "string"},
+            "start_seconds": {"type": "number", "minimum": 0},
+            "end_seconds": {"type": "number", "exclusiveMinimum": 0},
+        }, ["name", "start_seconds", "end_seconds"])},
+        "window_step_seconds": {"type": "number", "exclusiveMinimum": 0, "description": "Local measurement sampling interval; output capped at 120 windows/file."},
+    }), live_audio_analyze))
     server.add_tool(Tool("live_visual_capture", VISUAL_CAPTURE_DESCRIPTION, loose_schema(), lambda args: capture_ableton_window(
         output_path=args.get("output_path"),
         title_contains=args.get("title_contains"),

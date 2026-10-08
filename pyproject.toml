@@ -13,6 +13,7 @@ authors = [{ name = "Codex" }]
 dependencies = []
 
 [project.optional-dependencies]
+audio-analysis = ["numpy>=1.24", "soundfile>=0.12", "pyloudnorm>=0.1.1,<0.2"]
 dev = [
     "pytest>=8.0",
     "Pillow>=10",
