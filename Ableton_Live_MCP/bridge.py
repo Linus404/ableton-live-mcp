@@ -25,7 +25,7 @@ DEFAULT_CHILD_LIMIT = 200
 DEFAULT_MAIN_THREAD_TIMEOUT = 30
 DEFAULT_MAIN_THREAD_STALL_COOLDOWN = 10
 DEFAULT_BROWSER_ROOTS = ("instruments", "audio_effects", "midi_effects", "drums", "samples", "sounds", "packs", "plugins", "user_library", "user_folders", "current_project")
-REMOTE_SCRIPT_RUNTIME_VERSION = "transport-stop-settle-1"
+REMOTE_SCRIPT_RUNTIME_VERSION = "audio-capture-2"
 AGENT_AUDIO_TAP_HOST = "127.0.0.1"
 AGENT_AUDIO_TAP_PORT = 17654
 AGENT_M4L_HOST = "127.0.0.1"
@@ -441,6 +441,104 @@ class AbletonLiveMCP(ControlSurface):
                 sock.close()
         return {"sent": sent, "command": command, "path": path, "bytes": payload_size, "command_file": command_file, "command_id": command_id}
 
+    def _audio_capture_transport(self):
+        song = self.song()
+        return dict((key, getattr(song, attr, None)) for key, attr in (
+            ("playing", "is_playing"), ("time", "current_song_time"),
+            ("tempo", "tempo"), ("loop", "loop"), ("record_mode", "record_mode"),
+            ("session_record", "session_record"), ("arrangement_overdub", "arrangement_overdub"),
+            ("session_automation_record", "session_automation_record"), ("back_to_arranger", "back_to_arranger")))
+
+    def _audio_capture_guard(self):
+        state = self._audio_capture_transport()
+        for key in ("playing", "time", "loop", "record_mode", "session_record",
+                    "arrangement_overdub", "session_automation_record", "back_to_arranger"):
+            if state[key] is None:
+                raise RuntimeError("Audio capture requires known %s state" % key)
+        for key in ("record_mode", "session_record", "arrangement_overdub", "session_automation_record"):
+            if state[key]:
+                raise RuntimeError("Audio capture refuses recording/automation-write state: %s" % key)
+        if state["back_to_arranger"]:
+            raise RuntimeError("Audio capture requires Arrangement ownership; Session overrides are active")
+        return state
+
+    def _audio_capture_ref(self, obj, path=None):
+        if obj is None:
+            return None
+        ref = {"id": self._object_summary(obj)["id"]}
+        if path:
+            ref["path"] = path
+        return ref
+
+    def _rpc_audio_capture_snapshot(self, params):
+        song = self.song()
+        entries = self._agent_m4l_cleanup_tracks({})
+        refs = dict((self._object_id(entry["track"]), self._audio_capture_ref(entry["track"], entry["path"])) for entry in entries)
+        selected = getattr(song.view, "selected_track", None)
+        tracks = []
+        requested = params.get("track_refs")
+        requested_tracks = [self._resolve(ref) for ref in requested] if requested is not None else None
+        if requested_tracks is not None:
+            for track in requested_tracks:
+                if not any(self._same_live_object(track, entry["track"]) for entry in entries):
+                    raise ValueError("track_refs must reference tracks in the current set")
+        for entry in entries:
+            track, path = entry["track"], entry["path"]
+            kind = "master" if path == "live_set master_track" else ("return" if "return_tracks" in path else ("group" if getattr(track, "is_foldable", False) else "track"))
+            if kind == "return" and not params.get("include_returns", True):
+                continue
+            if kind == "master" and not params.get("include_master", True):
+                continue
+            if kind in ("track", "group") and requested_tracks is not None and not any(self._same_live_object(track, target) for target in requested_tracks):
+                continue
+            group = getattr(track, "group_track", None)
+            tracks.append({
+                "ref": refs[self._object_id(track)], "name": getattr(track, "name", ""), "kind": kind,
+                "has_audio_output": getattr(track, "has_audio_output", None), "is_frozen": getattr(track, "is_frozen", None),
+                "is_grouped": getattr(track, "is_grouped", None), "group_ref": refs.get(self._object_id(group)) if group is not None else None,
+            })
+        return {"song_ref": self._audio_capture_ref(song, "live_set"), "transport": self._audio_capture_transport(), "tracks": tracks,
+                "selected_track": refs.get(self._object_id(selected)) if selected is not None else None}
+
+    def _rpc_audio_capture_prepare(self, params):
+        beat = float(params["start_beat"])
+        if not (0 <= beat < float("inf")):
+            raise ValueError("start_beat must be finite and nonnegative")
+        self._audio_capture_guard()
+        song = self.song()
+        self._stop_transport(song)
+        if song.is_playing:
+            result = self._audio_capture_transport()
+            result.update({"prepared": False, "settled": False, "pending": "transport_stop"})
+            return result
+        song.loop = False
+        self._seek_song(song, beat)
+        result = self._audio_capture_transport()
+        result["prepared"] = True
+        result["settled"] = True
+        return result
+
+    def _rpc_audio_capture_restore(self, params):
+        if not isinstance(params.get("loop"), bool):
+            raise ValueError("loop must be a boolean")
+        selected = self._resolve(params["selected_track"]) if params.get("selected_track") else None
+        if selected is not None and not any(self._same_live_object(selected, entry["track"]) for entry in self._agent_m4l_cleanup_tracks({})):
+            raise ValueError("selected_track must reference a current track")
+        self._audio_capture_guard()
+        song = self.song()
+        self._stop_transport(song)
+        if song.is_playing:
+            result = self._audio_capture_transport()
+            result.update({"restored": False, "settled": False, "pending": "transport_stop"})
+            return result
+        song.loop = params["loop"]
+        if selected is not None:
+            song.view.selected_track = selected
+        result = self._audio_capture_transport()
+        result["restored"] = True
+        result["settled"] = True
+        return result
+
     def _rpc_agent_audio_tap_setup(self, params):
         song = self.song()
         placement = params.get("placement") or "master"
@@ -450,6 +548,9 @@ class AbletonLiveMCP(ControlSurface):
             target_track = self._resolve(params.get("target_track"))
         else:
             raise ValueError("target_track is required unless placement is master")
+
+        if params.get("isolated"):
+            return self._setup_isolated_audio_tap(target_track, params)
 
         if params.get("remove_existing"):
             self._delete_named_devices("AgentAudioTap")
@@ -487,6 +588,44 @@ class AbletonLiveMCP(ControlSurface):
             "time": getattr(song, "current_song_time", None),
             "playing": bool(getattr(song, "is_playing", False)),
         }
+
+    def _setup_isolated_audio_tap(self, track, params):
+        self._audio_capture_guard()
+        if params.get("remove_existing") or params.get("solo_track"):
+            raise ValueError("Isolated taps cannot remove existing devices or solo tracks")
+        name = params.get("device_name")
+        if not isinstance(name, str) or not name.startswith("AgentAudioTap_"):
+            raise ValueError("Isolated device_name must be a unique AgentAudioTap_ builder name")
+        if getattr(track, "has_audio_output", None) is not True or getattr(track, "is_frozen", None) is not False:
+            raise ValueError("Isolated taps require a known non-frozen track with audio output")
+        before = list(track.devices)
+        before_ids = set(self._object_id(device) for device in before)
+        matches = [device for device in before if getattr(device, "name", "") == name]
+        error = None
+        if not matches:
+            try:
+                self._load_agent_m4l_device(track, name, "audio_effect", {"device_index": len(before), "isolated": True})
+            except Exception as exc:
+                error = str(exc)
+        devices = list(track.devices)
+        owned = [{"ref": self._audio_capture_ref(device), "index": index, "name": getattr(device, "name", ""),
+                  "class_name": self._device_class_name(device)} for index, device in enumerate(devices)
+                 if self._object_id(device) not in before_ids]
+        matches = [(index, device) for index, device in enumerate(devices) if getattr(device, "name", "") == name]
+        index, tap = matches[0] if len(matches) == 1 else (None, None)
+        enabled = False
+        if tap is not None:
+            on = [parameter for parameter in getattr(tap, "parameters", []) if getattr(parameter, "name", "") == "Device On"]
+            enabled = len(on) == 1 and getattr(on[0], "value", None) == 1
+        verified = tap is not None and index == len(devices) - 1 and self._device_class_name(tap) == "MxDeviceAudioEffect" and enabled
+        if not verified and not error:
+            error = "Isolated tap identity, enabled state, or end-of-chain position could not be verified"
+        result = {"ok": verified and not error, "device_name": name, "target_track": getattr(track, "name", ""),
+                  "loaded": bool(owned), "owned_devices": owned, "end_verified": verified, "enabled": enabled,
+                  "tap_index": index, "tap_ref": self._audio_capture_ref(tap), "class_name": self._device_class_name(tap)}
+        if error:
+            result["load_error"] = error
+        return result
 
     def _rpc_agent_m4l_device(self, params):
         instance_id = self._agent_m4l_slug(params.get("instance_id") or params.get("name") or "device")
@@ -690,10 +829,13 @@ class AbletonLiveMCP(ControlSurface):
     def _load_agent_m4l_device(self, target_track, device_name, role, params):
         errors = []
         if hasattr(target_track, "insert_device") and not params.get("prefer_browser_load"):
+            before_ids = set(self._object_id(device) for device in target_track.devices) if params.get("isolated") else None
             try:
                 self._insert_track_device(target_track, device_name, role, params)
                 return True
             except Exception as exc:
+                if before_ids is not None and any(self._object_id(device) not in before_ids for device in target_track.devices):
+                    raise RuntimeError("Isolated tap insertion changed the device chain before failing: %s" % exc)
                 errors.append(str(exc))
         item = self._find_browser_item_named(device_name)
         if item is not None:

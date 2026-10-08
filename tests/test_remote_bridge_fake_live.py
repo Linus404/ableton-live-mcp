@@ -9,6 +9,8 @@ import time
 import types
 from pathlib import Path
 
+import pytest
+
 
 class FakeControlSurface:
     def __init__(self, _c_instance=None):
@@ -323,6 +325,10 @@ class FakeTrack:
         self.implicit_arm = False
         self.can_be_armed = True
         self.is_foldable = False
+        self.has_audio_output = True
+        self.is_frozen = False
+        self.is_grouped = False
+        self.group_track = None
         self.devices = FakeVector(devices or [])
         self.clip_slots = FakeVector(clip_slots or [])
         self.arrangement_clips = FakeVector(arrangement_clips or [])
@@ -349,7 +355,7 @@ class FakeTrack:
             device.class_name = "MxDeviceMidiEffect"
         elif "instrument" in device_name:
             device.class_name = "MxDeviceInstrument"
-        elif "audio_effect" in device_name:
+        elif "audio_effect" in device_name or device_name.startswith("AgentAudioTap_"):
             device.class_name = "MxDeviceAudioEffect"
         if device_index is None or device_index < 0 or device_index >= len(self.devices):
             self.devices.append(device)
@@ -378,6 +384,12 @@ class FakeSong:
         self.master_track = FakeTrack("Main")
         self.view = types.SimpleNamespace(selected_track=None)
         self.is_playing = False
+        self.loop = False
+        self.record_mode = False
+        self.session_record = False
+        self.arrangement_overdub = False
+        self.session_automation_record = False
+        self.back_to_arranger = False
 
     def get_beats_loop_start(self):
         return "1.1.1"
@@ -674,6 +686,192 @@ def test_agent_audio_tap_setup_solos_resolved_track_by_canonical_path(monkeypatc
     })
 
     assert [track.solo for track in song.tracks] == [True, False]
+
+
+def test_audio_capture_snapshot_enumerates_targets_and_selection(monkeypatch):
+    bridge, song, _app = make_bridge(monkeypatch)
+    song.tracks[0].is_foldable = True
+    song.tracks[1].is_grouped = True
+    song.tracks[1].group_track = song.tracks[0]
+    song.tracks[1].has_audio_output = False
+    song.tracks[1].is_frozen = True
+    song.view.selected_track = song.tracks[1]
+    snapshot = bridge._rpc_audio_capture_snapshot({})
+    assert bridge._resolve(snapshot["song_ref"]) is song
+    assert [target["kind"] for target in snapshot["tracks"]] == ["group", "track", "return", "master"]
+    child = snapshot["tracks"][1]
+    assert child["group_ref"] == snapshot["tracks"][0]["ref"]
+    assert child["has_audio_output"] is False and child["is_frozen"] is True
+    assert snapshot["selected_track"] == child["ref"]
+    assert bridge._resolve(child["ref"]) is song.tracks[1]
+    assert snapshot["transport"]["session_automation_record"] is False
+    subset = bridge._rpc_audio_capture_snapshot({"track_refs": [child["ref"]], "include_returns": False, "include_master": False})
+    assert subset["tracks"] == [child]
+    song.current_song_time = 12.5
+    poll = bridge._rpc_audio_capture_snapshot({"track_refs": [], "include_returns": False, "include_master": False})
+    assert poll["tracks"] == [] and poll["transport"]["time"] == 12.5
+    assert poll["transport"]["tempo"] == 120
+
+
+@pytest.mark.parametrize("flag", ["record_mode", "session_record", "arrangement_overdub", "session_automation_record", "back_to_arranger"])
+@pytest.mark.parametrize("unknown", [False, True])
+def test_audio_capture_guards_before_mutating(monkeypatch, flag, unknown):
+    bridge, song, _app = make_bridge(monkeypatch)
+    song.is_playing, song.loop, song.current_song_time = True, True, 15.0
+    if unknown:
+        delattr(song, flag)
+    else:
+        setattr(song, flag, True)
+    with pytest.raises(RuntimeError):
+        bridge._rpc_audio_capture_prepare({"start_beat": 2})
+    with pytest.raises(RuntimeError):
+        bridge._rpc_agent_audio_tap_setup({"isolated": True, "device_name": "AgentAudioTap_take"})
+    assert (song.is_playing, song.loop, song.current_song_time) == (True, True, 15.0)
+    assert not song.master_track.devices
+
+
+def test_audio_capture_prepare_restore_preserve_musical_state(monkeypatch):
+    bridge, song, _app = make_bridge(monkeypatch)
+    song.is_playing, song.loop, song.current_song_time = True, True, 15.0
+    song.view.selected_track = song.tracks[1]
+    song.tracks[0].solo = song.tracks[1].mute = True
+    signature = bridge._set_signature()
+    snapshot = bridge._rpc_audio_capture_snapshot({})
+    result = bridge._rpc_audio_capture_prepare({"start_beat": 2})
+    assert result["prepared"] and (song.is_playing, song.loop, song.current_song_time) == (False, False, 2)
+    song.view.selected_track = song.master_track
+    song.is_playing = True
+    result = bridge._rpc_audio_capture_restore({"loop": snapshot["transport"]["loop"], "selected_track": snapshot["selected_track"]})
+    assert result["restored"] and result["playing"] is False
+    assert song.loop is True and song.view.selected_track is song.tracks[1]
+    assert song.current_song_time == 2 and bridge._set_signature() == signature
+
+
+@pytest.mark.parametrize("phase", ["prepare", "restore"])
+def test_audio_capture_acknowledges_lagged_stop_before_other_mutations(monkeypatch, phase):
+    bridge, song, _app = make_bridge(monkeypatch)
+    song.is_playing, song.loop, song.current_song_time = True, True, 15.0
+    song.view.selected_track = song.master_track
+    monkeypatch.setattr(song, "stop_playing", lambda: None)
+    method = getattr(bridge, "_rpc_audio_capture_" + phase)
+    params = {"start_beat": 2} if phase == "prepare" else {"loop": False, "selected_track": {"path": "live_set tracks 0"}}
+    completion_key = "prepared" if phase == "prepare" else "restored"
+    result = method(params)
+    assert result[completion_key] is False and result["settled"] is False
+    assert result["pending"] == "transport_stop" and result["playing"] is True
+    assert song.loop is True and song.current_song_time == 15
+    assert song.view.selected_track is song.master_track
+    # The host settles between callbacks; only then may the acknowledged phase complete.
+    song.is_playing = False
+    assert bridge._rpc_audio_capture_snapshot({})["transport"]["playing"] is False
+    result = method(params)
+    assert result[completion_key] is True and result["settled"] is True and result["playing"] is False
+    assert song.loop is False
+    if phase == "prepare":
+        assert song.current_song_time == 2 and song.view.selected_track is song.master_track
+    else:
+        assert song.current_song_time == 15 and song.view.selected_track is song.tracks[0]
+
+
+@pytest.mark.parametrize("beat", [-1, float("nan"), float("inf")])
+def test_audio_capture_prepare_rejects_invalid_time(monkeypatch, beat):
+    bridge, song, _app = make_bridge(monkeypatch)
+    song.is_playing = True
+    with pytest.raises(ValueError):
+        bridge._rpc_audio_capture_prepare({"start_beat": beat})
+    assert song.is_playing is True
+
+
+def test_isolated_audio_tap_end_insertion_and_reuse(monkeypatch):
+    bridge, song, _app = make_bridge(monkeypatch)
+    track = song.tracks[0]
+    unrelated = FakeDevice()
+    unrelated.name = "AgentAudioTap"
+    track.devices.append(unrelated)
+    track.solo, track.mute, song.is_playing = True, True, True
+    params = {"isolated": True, "placement": "track", "target_track": {"path": "live_set tracks 0"}, "device_name": "AgentAudioTap_take_1"}
+    result = bridge._rpc_agent_audio_tap_setup(params)
+    assert result["ok"] and result["loaded"] and result["end_verified"] and result["enabled"]
+    assert result["tap_index"] == 2 and bridge._resolve(result["tap_ref"]) is track.devices[2]
+    assert len(result["owned_devices"]) == 1 and track.devices[1] is unrelated
+    again = bridge._rpc_agent_audio_tap_setup(params)
+    assert again["ok"] and not again["loaded"] and again["owned_devices"] == []
+    assert len(track.devices) == 3 and track.solo and track.mute and song.is_playing
+
+
+@pytest.mark.parametrize("problem", ["wrong_class", "disabled", "not_end", "duplicate"])
+def test_isolated_audio_tap_rejects_unverified_reuse(monkeypatch, problem):
+    bridge, song, _app = make_bridge(monkeypatch)
+    track = song.master_track
+    track.insert_device("AgentAudioTap_take")
+    tap = track.devices[0]
+    if problem == "wrong_class":
+        tap.class_name = "MxDeviceInstrument"
+    elif problem == "disabled":
+        tap.parameters[0].value = 0
+    elif problem == "not_end":
+        track.devices.append(FakeDevice())
+    else:
+        track.insert_device("AgentAudioTap_take")
+    before = list(track.devices)
+    result = bridge._rpc_agent_audio_tap_setup({"isolated": True, "device_name": "AgentAudioTap_take"})
+    assert not result["ok"] and not result["end_verified"] and result["load_error"]
+    assert list(track.devices) == before
+
+
+@pytest.mark.parametrize("attribute,value", [("is_frozen", True), ("is_frozen", None), ("has_audio_output", False), ("has_audio_output", None)])
+def test_isolated_audio_tap_rejects_unsupported_track(monkeypatch, attribute, value):
+    bridge, song, _app = make_bridge(monkeypatch)
+    setattr(song.master_track, attribute, value)
+    with pytest.raises(ValueError):
+        bridge._rpc_agent_audio_tap_setup({"isolated": True, "device_name": "AgentAudioTap_take"})
+    assert not song.master_track.devices
+
+
+def test_isolated_audio_tap_browser_load_verifies_actual_position(monkeypatch):
+    bridge, song, app = make_bridge(monkeypatch)
+    track = song.master_track
+    track.devices.append(FakeDevice())
+    app.browser.user_library._children.append(FakeBrowserItem("AgentAudioTap_take", loadable=True, device=True))
+    monkeypatch.setattr(track, "insert_device", lambda *_args: (_ for _ in ()).throw(RuntimeError("insert unavailable")))
+
+    def load(_item):
+        tap = FakeDevice()
+        tap.class_name = "MxDeviceAudioEffect"
+        track.devices.insert(0, tap)
+
+    monkeypatch.setattr(app.browser, "load_item", load)
+    result = bridge._rpc_agent_audio_tap_setup({"isolated": True, "device_name": "AgentAudioTap_take"})
+    assert not result["ok"] and result["loaded"] and not result["end_verified"]
+    assert len(result["owned_devices"]) == 1 and result["owned_devices"][0]["index"] == 0
+    assert bridge._resolve(result["owned_devices"][0]["ref"]) is track.devices[0]
+
+
+def test_isolated_audio_tap_partial_insert_failure_has_owned_ref_no_retry(monkeypatch):
+    bridge, song, app = make_bridge(monkeypatch)
+    track = song.master_track
+    app.browser.user_library._children.append(FakeBrowserItem("AgentAudioTap_take", loadable=True, device=True))
+    insert = track.insert_device
+
+    def partial_insert(*args):
+        insert(*args)
+        raise RuntimeError("partial insert")
+
+    monkeypatch.setattr(track, "insert_device", partial_insert)
+    result = bridge._rpc_agent_audio_tap_setup({"isolated": True, "device_name": "AgentAudioTap_take"})
+    assert not result["ok"] and result["loaded"] and "partial insert" in result["load_error"]
+    assert len(track.devices) == 1 and len(result["owned_devices"]) == 1
+    assert not app.browser.loaded
+
+
+def test_isolated_audio_tap_browser_load_without_visible_device_fails(monkeypatch):
+    bridge, song, app = make_bridge(monkeypatch)
+    track = song.master_track
+    app.browser.user_library._children.append(FakeBrowserItem("AgentAudioTap_take", loadable=True, device=True))
+    monkeypatch.setattr(track, "insert_device", lambda *_args: (_ for _ in ()).throw(RuntimeError("insert unavailable")))
+    result = bridge._rpc_agent_audio_tap_setup({"isolated": True, "device_name": "AgentAudioTap_take"})
+    assert not result["ok"] and not result["end_verified"] and result["tap_ref"] is None
+    assert result["owned_devices"] == []
 
 
 def test_agent_m4l_device_writes_command_sends_udp_and_loads(monkeypatch):
@@ -1936,7 +2134,7 @@ def test_ping_reports_running_remote_script_hash(monkeypatch):
     assert result["ok"] is True
     assert result["remote_script"]["path"].endswith("bridge.py")
     assert len(result["remote_script"]["bridge_sha256"]) == 64
-    assert result["remote_script"]["runtime_version"] == "transport-stop-settle-1"
+    assert result["remote_script"]["runtime_version"] == "audio-capture-2"
     assert len(result["remote_script"]["runtime_code_sha256"]) == 64
     assert result["remote_script"]["runtime_code_sha256"] == remote_script_status()["source_runtime_code_sha256"]
 

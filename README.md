@@ -64,6 +64,47 @@ The MCP includes an "Agent Audio Tap" Max for Live device that enables the agent
 Example usage where I asked Codex to generate a spectrogram of two piano tracks I had:
 <img width="3768" height="1028" alt="piano_tracks_first10_spectrograms" src="https://github.com/user-attachments/assets/6d2b6d9f-9a2c-4552-aa6c-91153de9df44" />
 
+### Real-time multi-track passage capture
+
+`live_audio_capture` records audio-capable tracks, groups, returns, and the master
+in one Arrangement playback pass using independently controlled Max for Live taps.
+For eight bars from 1.1.1 in 4/4, use:
+
+```json
+{"start_beat": 0, "length_beats": 32}
+```
+
+Times are quarter-note beats, not bar numbers. Optional `pre_roll_beats` plays
+earlier context, clamped to beat zero; `post_roll_beats` continues playback beyond
+the passage and is not an isolated effect-decay tail. Neither recreates arbitrary
+earlier instrument or effect history. The tool follows observed transport beats
+rather than estimating duration from the initial tempo.
+
+The result identifies retained local WAV files and a manifest, including failed
+or unsupported targets. Frozen tracks are unsupported; MIDI-only tracks without
+audio output are skipped. Max for Live and current installed/running Remote Script
+code are required. Active recording, automation writing, or Session overrides
+block capture. Playback stops after capture; loop and track selection are restored
+where possible. Tap devices remain in the set for reuse. Routing, solos, mutes,
+and musical clips are preserved.
+
+**Measurement limits:** files are raw, untrimmed recorder captures. Command
+acknowledgements do not establish audio readiness or sample timestamps. Boundaries
+and inter-file alignment are uncalibrated; do not use these files for
+precision-dependent comparisons. An end-of-device-chain tap measures that signal
+point, not a proven post-mixer contribution or final master output. Groups,
+returns, and master overlap upstream paths and must not be summed as independent
+stems. Mixer automation cannot be reconstructed from a settings snapshot.
+
+In the Live 12.4.6 disposable-set check, source taps retained signal with their
+track faders at zero or tracks muted, and the master tap retained signal with the
+master fader at zero. These recordings must not be treated as final-output stems.
+See `AUDIO_CAPTURE_IMPLEMENTATION.md` for measured evidence and timing limitations.
+
+Local regression tests do not establish Live recording, headroom, pass-through,
+or timing accuracy. Those require a current-runtime Live experiment with known
+sources and latency-bearing paths before stronger measurement claims.
+
 ## Ideas
 
 - Control your external synthesizers and other hardware with the MCP
