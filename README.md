@@ -320,6 +320,50 @@ when appropriate, carrying their signal path into the source description. Raw
 tap files remain isolated signal-point evidence and cannot establish source
 contribution to the mix. See `AUDIO_TONAL_VALIDATION.md` for verification scope.
 
+### Dynamics and impact evidence
+
+`live_audio_dynamics` analyzes identified mono/stereo WAVs offline with the
+`audio-analysis` extra. It reports original LUFS/RMS/sample peaks, pooled and
+per-channel crest, attack/body/tail levels and energy, and log-RMS envelope
+modulation. These are measurements, not a perceived punch score or pumping diagnosis.
+
+```json
+{
+  "source": {"name": "before", "path": "before.wav", "signal_path": "Same-source baseline Post Mixer recording"},
+  "comparison": {"name": "after", "path": "after.wav", "signal_path": "Same source through Compressor; recorded Post Mixer"},
+  "alignment": {"verified": true, "source": "Retained measured sync-marker experiment; equal native-clock files", "uncertainty_samples": 0},
+  "events": [{"name": "hit", "start_seconds": 1, "attack_end_seconds": 1.02, "body_end_seconds": 1.1, "end_seconds": 1.3}],
+  "sections": [{"name": "passage", "start_seconds": 0, "end_seconds": 4}],
+  "brief": {"description": "Preserve attack relative to body while controlling peaks"}
+}
+```
+
+Only `source` is required. Paired processing comparisons require identical rates/
+channel layouts and explicit zero-uncertainty alignment evidence. Different file
+epochs/lengths need `alignment.offsets_samples` mapping both unique source names
+to file frame indices at common time zero; only the common remaining interval is
+analyzed. Equal lengths or caller declarations alone do not verify physical alignment.
+Sections/events use common-time seconds in paired mode, file seconds otherwise.
+Optional `window_seconds` sets contiguous reporting windows (0.01–600 seconds,
+at most 120). Explicit events define musical attack/body/tail regions; omitted
+events use disclosed 6 dB-rise candidates and 20/100/300 ms default boundaries.
+Read candidate omissions/truncation: onset detection is not exhaustive.
+
+Modulation estimates analyze contiguous runs of at least four seconds of complete
+10 ms cells above the numerical floor, with timed run/omission coverage; silence
+gaps and shorter runs are unavailable, not interpolated. Envelope summaries assign
+every cell once by its start time, expose spans crossing reporting boundaries and
+retain explicit final partial-cell RMS/peak evidence.
+The final partial cell is retained in ordinary measurements but omitted from
+modulation. Below-reporting-resolution modulation (<0.0005 dB) has no fabricated
+frequency. Notes, tremolo and intentional ducking can resemble pumping.
+Paired level-change envelopes are not literal gain reduction for nonlinear
+processing. Before/after deltas retain original levels and separately predict
+LUFS-matched levels/headroom; no files are rewritten. Matching is unavailable
+when either integrated LUFS is unavailable. Sample peak is not true peak, DC
+is retained, and lower crest alone does not establish lost musical impact.
+See `AUDIO_DYNAMICS_VALIDATION.md` for the current verification ledger.
+
 ## Ideas
 
 - Control your external synthesizers and other hardware with the MCP

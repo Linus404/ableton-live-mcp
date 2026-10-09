@@ -320,6 +320,65 @@ and retain the original manifest/certificate externally. Raw taps support only
 their identified signal-point tonal observations. Do not infer masking, in-mix
 attribution, human approval or keep/revert recommendations from spectrum alone.
 
+## Dynamics and impact analysis
+
+Use `live_audio_dynamics` offline with required `source: {name,path,signal_path}`
+and optional `comparison` with the same shape. Paired mode is a same-source
+before/after experiment, not an unrelated musical reference. Require identical
+sample rate/channel layout and explicit `alignment: {verified:true,source,
+uncertainty_samples:0}`; without offsets, frame counts must match. Optional
+`offsets_samples` maps both unique names to nonnegative file frame indices at
+common time zero. Only the common remaining frames are analyzed. Alignment/path
+declarations are caller evidence, not independent acquisition qualification.
+Retain physical sync/source/routing evidence before attributing a difference to
+compression or limiting. Do not transfer a removed rig's certificate.
+
+Optional `sections` are `{name,start_seconds,end_seconds}` (at most 32), and
+`events` are `{name,start_seconds,attack_end_seconds,body_end_seconds,end_seconds}`
+(at most 120), in common-time seconds paired or file-relative seconds standalone.
+Strictly ordered explicit boundaries define the intended musical regions.
+Otherwise a bounded >=6 dB 10 ms RMS-rise candidate detector with 50 ms refractory
+period uses 20/100/300 ms default attack/body/tail regions, clipped at next onset
+or file end. Read `event_coverage`, candidate omissions and truncated/unavailable
+regions; no exhaustive or sample-exact onset claim. `window_seconds` is 0.01–600,
+default adapted to at most 120 contiguous reporting windows. Optional
+`brief: {description}` retains intent without universal dynamics targets.
+
+Original levels, pooled/per-channel crest, direct regional RMS/peak/energy,
+attack/body and tail/body contrasts, peak times and quantized envelope rise time
+are objective observations. Silence/floor-limited ratios remain null. Crest is
+sample peak over unweighted RMS, not LRA, true peak or perceived punch. Mean
+channel power avoids stereo phase cancellation but does not establish mono
+compatibility. DC is disclosed and retained. Energy depends on region duration;
+RMS contrasts must not be confused with unequal-duration energy ratios.
+
+Log-RMS envelope modulation uses Hann rFFT over contiguous complete 10 ms cells,
+0.5–10 Hz and >=4 seconds per contiguous eligible run, with no interpolation
+across silent/floor-limited cells. Timed runs and unmeasured coverage are explicit;
+the strongest reported eligible run supplies the top-level summary (at most 120
+runs). Envelope summaries assign each cell once by start time and expose actual
+cell spans crossing reporting boundaries. Ineligible intervals return explicit
+reasons; partial final cells retain explicit RMS/peak/frame evidence and remain
+in ordinary envelope/level evidence but not modulation. Amplitude modulation
+can reflect notes/tremolo/intentional ducking, not proven compressor pumping.
+Paired level-change envelopes are not literal gain reduction through nonlinear
+processors or creative tails. Deliberate pumping tests need a sustained eligible
+signal, while isolated percussive tests may validly have unavailable modulation.
+Modulation standard deviation and in-band component amplitude below 0.0005 dB
+(the 0.001 dB reporting resolution) do not receive a measured frequency.
+
+Comparisons are after-minus-before and retain original levels, shared source
+event boundaries, separately predicted LUFS-matched differences and peak
+headroom. No gain is written to files; unavailable LUFS means unavailable matching.
+No automatic improvement, human approval or keep/revert judgment follows from
+louder levels, reduced crest or envelope periodicity. `processing_complete` is
+not exhaustive event coverage or acquisition qualification.
+
+Bounds: two WAVs, 128 MiB/600 seconds/12 million scalar samples/file, mono/stereo
+8–192 kHz, 96 million reserved sample-work including repeated regions/envelopes.
+Reuse `audio-analysis`; no Live calls or state mutations. Read
+`AUDIO_DYNAMICS_VALIDATION.md` for actual numerical/physical acceptance evidence.
+
 ## Visual validation captures
 
 For M4L UI visual validation, use `live_visual_capture` or `ableton-live-mcp-capture-window` to capture only Ableton Live windows. This tool is never a general screenshot API: do not add arguments or workflows that capture arbitrary apps, monitors, desktops, browser windows, terminals, or user-selected window handles. The implementation must enumerate candidate OS windows, filter them to verified Ableton Live processes first, and only then apply optional title filters.
