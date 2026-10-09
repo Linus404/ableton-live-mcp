@@ -393,7 +393,7 @@ class AbletonLiveMCP(ControlSurface):
 
     def _remote_script_info(self):
         path = globals().get("__file__", "")
-        info = {"path": str(path), "runtime_version": REMOTE_SCRIPT_RUNTIME_VERSION}
+        info = {"path": str(path), "runtime_version": REMOTE_SCRIPT_RUNTIME_VERSION, "process_id": os.getpid()}
         try:
             info["runtime_code_sha256"] = _runtime_code_fingerprint()
         except Exception as exc:
@@ -499,6 +499,410 @@ class AbletonLiveMCP(ControlSurface):
             })
         return {"song_ref": self._audio_capture_ref(song, "live_set"), "transport": self._audio_capture_transport(), "tracks": tracks,
                 "selected_track": refs.get(self._object_id(selected)) if selected is not None else None}
+
+    def _in_mix_route_name(self, route):
+        return getattr(route, "display_name", str(route))
+
+    def _in_mix_choose_route(self, routes, name):
+        matches = [route for route in routes if self._in_mix_route_name(route) == name]
+        if len(matches) != 1:
+            raise ValueError("Routing option is missing or ambiguous: %s" % name)
+        return matches[0]
+
+    def _in_mix_track_context(self, track):
+        def optional(obj, name):
+            try:
+                value = getattr(obj, name, None)
+                return value if isinstance(value, (bool, int, float, str)) or value is None else str(value)
+            except Exception:
+                return None
+        def routing(name):
+            try:
+                route = getattr(track, name, None)
+                return self._in_mix_route_name(route) if route is not None else None
+            except Exception:
+                return None
+        devices = list(track.devices)
+        if len(devices) > 64:
+            raise ValueError("Capture context supports at most 64 devices per path")
+        chain = []
+        for device in devices:
+            parameters = list(device.parameters)
+            if len(parameters) > 256:
+                raise ValueError("Capture context supports at most 256 parameters per device")
+            chain.append({"name": getattr(device, "name", ""), "class_name": self._device_class_name(device),
+                          "latency_in_samples": optional(device, "latency_in_samples"),
+                          "latency_in_ms": optional(device, "latency_in_ms"),
+                          "is_active": optional(device, "is_active"),
+                          "parameters": [{"name": getattr(p, "name", ""), "value": optional(p, "value")} for p in parameters]})
+        mixer = track.mixer_device
+        return {"input_type": routing("input_routing_type"), "input_channel": routing("input_routing_channel"),
+                "output_type": routing("output_routing_type"), "output_channel": routing("output_routing_channel"),
+                "volume": optional(getattr(mixer, "volume", None), "value"), "panning": optional(getattr(mixer, "panning", None), "value"),
+                "mute": optional(track, "mute"), "solo": optional(track, "solo"),
+                "delay_in_ms": optional(track, "delay_in_ms"), "track_delay": optional(track, "track_delay"),
+                "devices": chain}
+
+    def _rpc_in_mix_capture_plan(self, params):
+        self._audio_capture_guard()
+        song = self.song()
+        if any(getattr(track, "solo", False) for track in list(song.tracks) + list(song.return_tracks)):
+            raise ValueError("In-mix capture currently requires no soloed tracks")
+        snapshot = self._rpc_audio_capture_snapshot(params)
+        requested = params.get("track_refs")
+        selected = []
+        unsupported = []
+        for entry in snapshot["tracks"]:
+            track = self._resolve(entry["ref"])
+            output = self._in_mix_route_name(getattr(track, "output_routing_type", None))
+            if entry["kind"] != "master" and output not in ("Master", "Main"):
+                if requested is not None and entry["kind"] in ("track", "group"):
+                    raise ValueError("Selected contributions must route directly to Master: %s -> %s" % (entry["name"], output))
+                unsupported.append(dict(entry, outcome="unsupported", reason="nonterminal_or_nonmaster_route", output_routing=output))
+                continue
+            if entry["has_audio_output"] is not True or entry["is_frozen"] is not False:
+                unsupported.append(dict(entry, outcome="unsupported", reason="frozen" if entry["is_frozen"] else "no_audio_output_or_unknown_capability"))
+                continue
+            entry["output_routing"] = output
+            entry["role"] = "program" if entry["kind"] == "master" else "contribution"
+            selected.append(entry)
+        if not selected or len(selected) > 16:
+            raise ValueError("In-mix capture requires 1-16 stereo paths")
+        names = [entry["name"] for entry in selected if entry["kind"] != "master"]
+        all_names = [getattr(track, "name", "") for track in list(song.tracks) + list(song.return_tracks)]
+        if any(all_names.count(name) != 1 for name in names):
+            raise ValueError("Capture source names must be unique for routing identity")
+        snapshot["tracks"] = selected
+        snapshot["unsupported_tracks"] = unsupported
+        snapshot["selected_device"] = self._audio_capture_ref(getattr(song.view, "selected_device", None))
+        snapshot["signal_path"] = "terminal Master-routed sources via Post Mixer; Master via Resampling"
+        context = {"master": self._in_mix_track_context(song.master_track),
+                   "latency_evidence": "Unavailable properties are null, not evidence of zero latency or enabled PDC"}
+        for key in ("delay_compensation", "reduced_latency_when_monitoring", "latency_compensation"):
+            try:
+                value = getattr(song, key, None)
+                context[key] = value if isinstance(value, (bool, int, float, str)) else None
+            except Exception:
+                context[key] = None
+        context["global_delay_compensation"] = context.pop("delay_compensation")
+        if not isinstance(context["global_delay_compensation"], bool):
+            context["global_delay_compensation"] = None
+        snapshot["source_contexts"] = [{"kind": entry["kind"], "role": entry["role"],
+                                        "context": self._in_mix_track_context(self._resolve(entry["ref"]))}
+                                       for entry in selected if entry["kind"] != "master"]
+        snapshot["capture_context"] = context
+        return snapshot
+
+    def _rpc_in_mix_capture_add_receiver(self, params):
+        self._audio_capture_guard()
+        song = self.song()
+        if song.is_playing:
+            raise ValueError("Receiver setup requires stopped transport")
+        token = params.get("token")
+        native = params.get("native") is True
+        name = params.get("device_name") or ("AgentInMix_" + str(token) + "_native" if native else None)
+        recorder = params.get("recorder_device_name")
+        if not isinstance(token, str) or not token.isalnum() or len(token) != 32:
+            raise ValueError("Capture ownership token must be 32 alphanumeric characters")
+        prefix = "AgentInMix_" + token + "_"
+        if not isinstance(name, str) or not name.startswith(prefix) or (recorder and not recorder.startswith(prefix)):
+            raise ValueError("Devices must belong to this capture token")
+        source = self._resolve(params["source_ref"])
+        if not any(self._same_live_object(source, entry["track"]) for entry in self._agent_m4l_cleanup_tracks({})):
+            raise ValueError("Source must be a current track")
+        if getattr(source, "has_audio_output", None) is not True or getattr(source, "is_frozen", None) is not False:
+            raise ValueError("Source must have non-frozen audio output")
+        owned = getattr(self, "_in_mix_owned", None)
+        if owned is None:
+            owned = self._in_mix_owned = {}
+        registry = owned.setdefault(token, [])
+        song.create_audio_track(-1)
+        receiver = song.tracks[-1]
+        registry.append(receiver)  # Ownership survives partial routing/device-load failures.
+        receiver.name = prefix + str(len(registry))
+        configs = getattr(self, "_in_mix_configs", None)
+        if configs is None:
+            configs = self._in_mix_configs = {}
+        config = {"receiver": receiver, "source": source, "device_name": name, "recorder_device_name": recorder, "native": native}
+        configs.setdefault(token, []).append(config)
+        receiver.arm = False
+        receiver.mute = True
+        receiver.current_monitoring_state = 2
+        return {"ok": False, "pending": "routing_settle", "token": token, "receiver_ref": self._audio_capture_ref(receiver),
+                "source_ref": self._audio_capture_ref(source), "owned_count": len(registry)}
+
+    def _rpc_in_mix_capture_configure_receiver(self, params):
+        self._audio_capture_guard()
+        song = self.song()
+        if song.is_playing:
+            raise ValueError("Receiver setup requires stopped transport")
+        token = params.get("token")
+        receiver = self._resolve(params["receiver_ref"])
+        matches = [config for config in getattr(self, "_in_mix_configs", {}).get(token, [])
+                   if self._same_live_object(receiver, config["receiver"])]
+        if len(matches) != 1 or not any(self._same_live_object(receiver, track) for track in song.tracks):
+            raise ValueError("Receiver is not owned by this capture")
+        config = matches[0]
+        if "result" in config:
+            return config["result"]
+        source, name, recorder = config["source"], config["device_name"], config["recorder_device_name"]
+        pending = {"ok": False, "pending": "routing_settle", "token": token, "receiver_ref": self._audio_capture_ref(receiver)}
+        master = self._same_live_object(source, song.master_track)
+        route_name = "Resampling" if master else source.name
+        inputs = [route for route in receiver.available_input_routing_types if self._in_mix_route_name(route) == route_name]
+        if not inputs:
+            return dict(pending, waiting_for="input_type", route=route_name)
+        if len(inputs) != 1:
+            raise ValueError("Ambiguous capture source route: %s" % route_name)
+        if self._in_mix_route_name(receiver.input_routing_type) != route_name:
+            receiver.input_routing_type = inputs[0]
+            return dict(pending, waiting_for="input_channel", route=route_name)
+        if not master:
+            channels = [route for route in receiver.available_input_routing_channels if self._in_mix_route_name(route) == "Post Mixer"]
+            if not channels:
+                return dict(pending, waiting_for="input_channel", route="Post Mixer")
+            if len(channels) != 1:
+                raise ValueError("Ambiguous Post Mixer route")
+            receiver.input_routing_channel = channels[0]
+        try:
+            receiver.output_routing_type = self._in_mix_choose_route(receiver.available_output_routing_types, "Sends Only")
+            for send in receiver.mixer_device.sends:
+                send.value = send.min
+            receiver.current_monitoring_state = 2 if config.get("native") else 0
+            receiver.arm = False
+            receiver.mute = False
+            receiver.solo = False
+            if self._in_mix_route_name(receiver.output_routing_type) != "Sends Only" or any(send.value != send.min for send in receiver.mixer_device.sends):
+                raise RuntimeError("Receiver output isolation failed")
+            if not config.get("native"):
+                self._load_agent_m4l_device(receiver, name, "audio_effect", {"device_index": 0, "isolated": True})
+                if recorder:
+                    self._load_agent_m4l_device(receiver, recorder, "audio_effect", {"device_index": 1, "isolated": True})
+            expected = [] if config.get("native") else [name] + ([recorder] if recorder else [])
+            devices = list(receiver.devices)
+            if [getattr(device, "name", "") for device in devices] != expected:
+                raise RuntimeError("Owned capture device identity/order not verified")
+            for device in devices:
+                on = [p for p in device.parameters if p.name == "Device On"]
+                if self._device_class_name(device) != "MxDeviceAudioEffect" or len(on) != 1 or on[0].value != 1:
+                    raise RuntimeError("Owned capture device class/enabled state not verified")
+            config["result"] = {"ok": True, "receiver_ref": self._audio_capture_ref(receiver), "source_ref": self._audio_capture_ref(source),
+                    "input_type": self._in_mix_route_name(receiver.input_routing_type),
+                    "input_channel": self._in_mix_route_name(receiver.input_routing_channel), "output_type": "Sends Only", "token": token}
+        except Exception as exc:
+            config["result"] = {"ok": False, "error": str(exc), "token": token, "receiver_ref": self._audio_capture_ref(receiver)}
+        return config["result"]
+
+    def _rpc_in_mix_capture_cleanup(self, params):
+        self._audio_capture_guard()
+        song = self.song()
+        if song.is_playing:
+            raise ValueError("Receiver cleanup requires stopped transport")
+        token = params.get("token")
+        registry = getattr(self, "_in_mix_owned", {}).get(token, [])
+        deleted = []
+        for index in range(len(song.tracks) - 1, -1, -1):
+            track = song.tracks[index]
+            if any(self._same_live_object(track, owner) for owner in registry):
+                deleted.append(self._audio_capture_ref(track))
+                song.delete_track(index)
+        getattr(self, "_in_mix_owned", {}).pop(token, None)
+        getattr(self, "_in_mix_configs", {}).pop(token, None)
+        if params.get("selected_device"):
+            song.view.select_device(self._resolve(params["selected_device"]))
+        return {"ok": True, "deleted": deleted, "token": token}
+
+    def _native_in_mix_receiver_proof(self, token, receiver):
+        song = self.song()
+        configs = [item for item in getattr(self, "_in_mix_configs", {}).get(token, [])
+                   if self._same_live_object(item["receiver"], receiver) and item.get("native")]
+        if len(configs) != 1:
+            raise RuntimeError("Native receiver configuration ownership is unavailable")
+        source = configs[0]["source"]
+        master = self._same_live_object(source, song.master_track)
+        if not any(self._same_live_object(source, item["track"]) for item in self._agent_m4l_cleanup_tracks({})):
+            raise RuntimeError("Native source is no longer in this set")
+        route_name = "Resampling" if master else source.name
+        if not master and sum(getattr(item, "name", "") == source.name for item in list(song.tracks) + list(song.return_tracks)) != 1:
+            raise RuntimeError("Native source routing name is no longer unique")
+        input_type = self._in_mix_route_name(receiver.input_routing_type)
+        input_channel = self._in_mix_route_name(receiver.input_routing_channel)
+        sends_zero = all(parameter.value == parameter.min for parameter in receiver.mixer_device.sends)
+        if (input_type != route_name or (not master and input_channel != "Post Mixer")
+                or receiver.current_monitoring_state != 2 or receiver.devices
+                or self._in_mix_route_name(receiver.output_routing_type) != "Sends Only" or not sends_zero):
+            raise RuntimeError("Native receiver routing, monitoring or output isolation changed")
+        return {"source_ref": self._audio_capture_ref(source), "input_type": input_type, "input_channel": input_channel,
+                "output_type": "Sends Only", "current_monitoring_state": 2,
+                "sends_zero": sends_zero, "devices_empty": True, "route_verified": True}
+
+    def _native_in_mix_guard(self, token=None):
+        song = self.song()
+        state = getattr(self, "_native_in_mix_take", None)
+        owned = getattr(self, "_in_mix_owned", {}).get(token, []) if token else []
+        if song.record_mode and not (state and state["token"] == token and state.get("begun")):
+            raise RuntimeError("Native capture does not own Arrangement recording")
+        for key in ("session_record", "arrangement_overdub", "session_automation_record", "back_to_arranger"):
+            if getattr(song, key, None) is not False:
+                raise RuntimeError("Native capture requires known disabled %s" % key)
+        for track in song.tracks:
+            if any(self._same_live_object(track, item) for item in owned):
+                continue
+            if getattr(track, "can_be_armed", False):
+                if getattr(track, "arm", None) is not False or getattr(track, "implicit_arm", False):
+                    raise RuntimeError("Native capture refuses armed or implicitly armed original tracks")
+        for receiver in owned:
+            self._native_in_mix_receiver_proof(token, receiver)
+            if state and state.get("begun") and not state.get("stopped") and not receiver.arm:
+                raise RuntimeError("Native owned receiver was disarmed during recording")
+        return state
+
+    def _rpc_native_in_mix_plan(self, params):
+        self._native_in_mix_guard()
+        song = self.song()
+        if getattr(song, "count_in_duration", None) != 0:
+            raise RuntimeError("Native capture requires count-in disabled")
+        for key in ("punch_in", "punch_out", "loop_start", "loop_length", "start_time"):
+            if getattr(song, key, None) is None:
+                raise RuntimeError("Native capture requires known %s" % key)
+        return self._rpc_in_mix_capture_plan(params)
+
+    def _rpc_native_in_mix_prepare(self, params):
+        song = self.song()
+        token = params["token"]
+        state = getattr(self, "_native_in_mix_take", None)
+        if state and state["token"] != token:
+            raise RuntimeError("Another native capture owns transport")
+        self._native_in_mix_guard(token)
+        start, end = float(params["start_beat"]), float(params["end_beat"])
+        if not (0 <= start < end < float("inf")):
+            raise ValueError("Native capture requires finite increasing bounds")
+        if state is None:
+            state = self._native_in_mix_take = {"token": token, "start_beat": start, "end_beat": end,
+                    "begun": False, "prior": {key: getattr(song, key) for key in
+                        ("loop", "loop_start", "loop_length", "punch_in", "punch_out", "record_mode", "start_time")}}
+        if state.get("begun"):
+            raise RuntimeError("Native take already began; do not retry start")
+        if song.is_playing:
+            self._stop_transport(song)
+        if song.is_playing:
+            return {"prepared": False, "pending": "transport_stop", "settled": False}
+        song.loop = False
+        song.punch_in = False
+        song.loop_start = start
+        song.loop_length = end - start
+        song.punch_out = True
+        if not state.get("seek_requested"):
+            song.current_song_time = start
+            song.start_time = start
+            state["seek_requested"] = True
+        if abs(song.current_song_time - start) > 1e-7 or abs(song.start_time - start) > 1e-7:
+            return {"prepared": False, "pending": "transport_seek", "settled": False,
+                    "expected_start_beat": start, "transport": self._audio_capture_transport()}
+        return {"prepared": True, "prior": state["prior"], "engine_record_end_beat": end,
+                "transport": self._audio_capture_transport()}
+
+    def _rpc_native_in_mix_begin(self, params):
+        song = self.song()
+        token = params["token"]
+        state = self._native_in_mix_guard(token)
+        if not state or state["token"] != token or state.get("begun") or song.is_playing:
+            raise RuntimeError("Native capture start requires its prepared stopped ownership epoch")
+        if (not state.get("seek_requested") or abs(song.current_song_time - state["start_beat"]) > 1e-7
+                or abs(song.start_time - state["start_beat"]) > 1e-7):
+            raise RuntimeError("Native capture playhead no longer matches its prepared acquisition epoch")
+        owned = getattr(self, "_in_mix_owned", {}).get(token, [])
+        if not owned or len(owned) > 16:
+            raise ValueError("Native capture requires 1-16 owned receivers")
+        for receiver in owned:
+            if receiver.devices or receiver.current_monitoring_state != 2 or receiver.arrangement_clips:
+                raise RuntimeError("Native receiver must be empty, Monitor Off and without devices")
+            if self._in_mix_route_name(receiver.output_routing_type) != "Sends Only" or any(p.value != p.min for p in receiver.mixer_device.sends):
+                raise RuntimeError("Native receiver output isolation changed")
+            receiver.arm = True
+        if not all(receiver.arm for receiver in owned):
+            raise RuntimeError("Native receiver arm states did not settle together")
+        self._native_in_mix_guard(token)
+        duration = float(params["max_duration_seconds"])
+        if not (0 < duration <= 600):
+            raise ValueError("Native watchdog duration must be in (0,600]")
+        state["begun"] = True  # Fail closed after any sent begin, including a partial host error.
+        state["begin_unix"] = time.time()
+        state["watchdog_deadline"] = time.monotonic() + duration
+        state["watchdog_duration_seconds"] = duration
+        state["watchdog_triggered"] = False
+        self.schedule_message(1, lambda: self._native_in_mix_watchdog(token))
+        song.record_mode = True
+        song.start_playing()
+        return {"begun": True, "token": token, "record_mode": song.record_mode,
+                "engine_record_end_beat": state["end_beat"], "transport": self._audio_capture_transport(),
+                "watchdog_duration_seconds": duration, "watchdog_kind": "Remote Script scheduler deadline; not audio-thread hard real time"}
+
+    def _native_in_mix_watchdog(self, token):
+        state = getattr(self, "_native_in_mix_take", None)
+        if not state or state["token"] != token or state.get("stopped") or not state.get("begun"):
+            return
+        remaining = state["watchdog_deadline"] - time.monotonic()
+        if remaining > 0:
+            self.schedule_message(1, lambda: self._native_in_mix_watchdog(token))
+            return
+        state["watchdog_triggered"] = True
+        try:
+            self._rpc_native_in_mix_stop({"token": token})
+        except Exception as exc:
+            state["watchdog_error"] = str(exc)
+
+    def _rpc_native_in_mix_status(self, params):
+        token = params["token"]
+        state = self._native_in_mix_guard(token)
+        if not state or state["token"] != token:
+            raise RuntimeError("Native take ownership is unavailable")
+        entries = []
+        for receiver in getattr(self, "_in_mix_owned", {}).get(token, []):
+            clips = list(receiver.arrangement_clips)
+            clip_data = []
+            for clip in clips:
+                data = {key: getattr(clip, key, None) for key in ("file_path", "sample_rate", "sample_length", "start_time", "end_time",
+                        "start_marker", "end_marker", "warping", "is_recording", "is_audio_clip", "is_arrangement_clip")}
+                try:
+                    markers = list(clip.warp_markers)
+                    data["warp_markers"] = [self._warp_marker_summary(marker) for marker in markers[:128]]
+                    data["warp_markers_truncated"] = len(markers) > 128
+                except Exception:
+                    data["warp_markers"] = None
+                clip_data.append(data)
+            proof = self._native_in_mix_receiver_proof(token, receiver)
+            entries.append(dict(proof, **{"receiver_ref": self._audio_capture_ref(receiver), "name": receiver.name, "arm": receiver.arm,
+                            "input_meter_left": getattr(receiver, "input_meter_left", None), "input_meter_right": getattr(receiver, "input_meter_right", None),
+                            "clips": clip_data}))
+        return {"token": token, "transport": self._audio_capture_transport(), "receivers": entries,
+                "engine_record_end_beat": state["end_beat"], "begin_unix": state.get("begin_unix"),
+                "watchdog_duration_seconds": state.get("watchdog_duration_seconds"),
+                "watchdog_triggered": state.get("watchdog_triggered"), "watchdog_error": state.get("watchdog_error")}
+
+    def _rpc_native_in_mix_stop(self, params):
+        song = self.song()
+        state = getattr(self, "_native_in_mix_take", None)
+        if not state or state["token"] != params["token"]:
+            raise RuntimeError("Native stop requires the exact owned take")
+        # Stop our recording even if a user arm/automation change invalidated a status guard.
+        song.record_mode = False
+        self._stop_transport(song)
+        state["stopped"] = True
+        for receiver in getattr(self, "_in_mix_owned", {}).get(params["token"], []):
+            receiver.arm = False
+        return {"stopped": not song.is_playing, "pending": "transport_stop" if song.is_playing else None,
+                "record_mode": song.record_mode, "token": params["token"]}
+
+    def _rpc_native_in_mix_restore(self, params):
+        song = self.song()
+        state = getattr(self, "_native_in_mix_take", None)
+        if not state or state["token"] != params["token"] or song.is_playing or song.record_mode:
+            raise RuntimeError("Native restore requires stopped exact take ownership")
+        for key in ("loop", "loop_start", "loop_length", "punch_in", "punch_out", "record_mode", "start_time"):
+            setattr(song, key, state["prior"][key])
+        self._native_in_mix_take = None
+        return {"restored": True}
 
     def _rpc_audio_capture_prepare(self, params):
         beat = float(params["start_beat"])
@@ -960,11 +1364,11 @@ class AbletonLiveMCP(ControlSurface):
             self._seek_song(song, float(params["time"]))
         action = params.get("action")
         if action == "play":
+            if params.get("time") is not None:
+                song.start_time = float(params["time"])
             self._start_transport(song)
         elif action == "continue":
             song.continue_playing()
-            if not getattr(song, "is_playing", False):
-                self._start_transport(song)
         elif action == "stop":
             self._stop_transport(song)
         elif action not in (None, "status"):
@@ -983,8 +1387,7 @@ class AbletonLiveMCP(ControlSurface):
         return payload
 
     def _seek_song(self, song, time_value):
-        current = float(getattr(song, "current_song_time", 0.0))
-        song.jump_by(time_value - current)
+        song.current_song_time = time_value
 
     def _start_transport(self, song):
         song.start_playing()
@@ -997,7 +1400,6 @@ class AbletonLiveMCP(ControlSurface):
             song.start_playing()
 
     def _stop_transport(self, song):
-        song.stop_playing()
         if getattr(song, "is_playing", False):
             song.stop_playing()
 
