@@ -313,6 +313,28 @@ def make_server(client: AbletonBridgeClient | None = None) -> StdioMcpServer:
         return capture_audio(bridge, args)
 
     server.add_tool(Tool("live_audio_capture", "Capture; see AGENTS.md.", loose_schema(), live_audio_capture))
+    def live_audio_capture_in_mix(args):
+        from in_mix_capture import capture_in_mix
+        from in_mix_qualification import attach_qualification
+        return attach_qualification(capture_in_mix(bridge, args))
+
+    server.add_tool(Tool("live_audio_capture_in_mix", "Native post-mixer passage capture; requires stopped transport. Qualification required before assessment; see AGENTS.md.", schema({
+        "start_beat": {"type": "number", "minimum": 0},
+        "length_beats": {"type": "number", "exclusiveMinimum": 0},
+        "track_refs": {"type": "array", "items": ref},
+        "return_refs": {"type": "array", "items": ref},
+        "include_returns": {"type": "boolean"}, "include_master": {"type": "boolean"},
+        "pre_roll_beats": {"type": "number", "minimum": 0}, "post_roll_beats": {"type": "number", "minimum": 0},
+        "max_duration_seconds": {"type": "number", "exclusiveMinimum": 0, "maximum": 600},
+        "output_directory": {"type": "string"},
+    }, ["start_beat", "length_beats"]), live_audio_capture_in_mix))
+    def live_audio_capture_in_mix_calibrate(args):
+        from in_mix_calibration import calibrate_in_mix
+        return calibrate_in_mix(bridge, args)
+
+    server.add_tool(Tool("live_audio_capture_in_mix_calibrate", "Experimentally qualify capture: creates/removes owned calibration audio tracks and temporarily plays audio, preserving music. Requires stopped transport, no recording or solos; see AGENTS.md.", schema({
+        "output_directory": {"type": "string"},
+    }), live_audio_capture_in_mix_calibrate))
     def live_audio_analyze(args):
         from audio_analysis import analyze_audio
         return analyze_audio(args)
@@ -327,6 +349,70 @@ def make_server(client: AbletonBridgeClient | None = None) -> StdioMcpServer:
         }, ["name", "start_seconds", "end_seconds"])},
         "window_step_seconds": {"type": "number", "exclusiveMinimum": 0, "description": "Local measurement sampling interval; output capped at 120 windows/file."},
     }), live_audio_analyze))
+    def live_audio_masking(args):
+        from audio_masking import analyze_masking
+        return analyze_masking(args)
+
+    masking_source = schema({
+        "name": {"type": "string"}, "path": {"type": "string"},
+        "gain_db": {"type": "number", "minimum": -60, "maximum": 60},
+    }, ["name", "path"])
+    listening_condition = schema({
+        "kind": {"type": "string", "enum": ["calibrated", "assumed"]},
+        "db_spl_at_0_dbfs_rms": {"type": "number", "minimum": 0, "maximum": 140}, "source": {"type": "string"},
+    }, ["kind", "db_spl_at_0_dbfs_rms", "source"])
+    audio_sections = {"type": "array", "maxItems": 32, "items": schema({
+        "name": {"type": "string"}, "start_seconds": {"type": "number", "minimum": 0},
+        "end_seconds": {"type": "number", "exclusiveMinimum": 0},
+    }, ["name", "start_seconds", "end_seconds"])}
+    masking_properties = {
+        "target": masking_source,
+        "competitors": {"type": "array", "minItems": 1, "maxItems": 8, "items": masking_source},
+        "alignment": schema({
+            "verified": {"type": "boolean", "const": True},
+            "source": {"type": "string"},
+            "uncertainty_samples": {"type": "integer", "const": 0},
+            "offsets_samples": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 0}},
+        }, ["verified", "source", "uncertainty_samples"]),
+        "provenance": schema({
+            "disjoint_contributions": {"type": "boolean", "const": True},
+            "in_mix_levels": {"type": "boolean", "const": True},
+            "signal_path": {"type": "string"},
+        }, ["disjoint_contributions", "in_mix_levels", "signal_path"]),
+        "window_seconds": {"type": "number", "minimum": 0.1, "maximum": 1},
+        "max_windows": {"type": "integer", "minimum": 1, "maximum": 120},
+        "listening_condition": listening_condition, "sections": audio_sections,
+    }
+    server.add_tool(Tool("live_audio_masking", "Offline measured excitation and optional Model-1-adapted masking thresholds under explicit listening conditions; see AGENTS.md.", schema(masking_properties, ["target", "competitors", "alignment", "provenance"]), live_audio_masking))
+    balance_options = {
+        "listening_condition": listening_condition, "sections": audio_sections,
+        "expected_section_differences": {"type": "array", "maxItems": 32, "items": schema({
+            "from_section": {"type": "string"}, "to_section": {"type": "string"},
+            "expected_delta_lu": {"type": "number", "minimum": -120, "maximum": 120}, "tolerance_lu": {"type": "number", "minimum": 0.001, "maximum": 120},
+        }, ["from_section", "to_section", "expected_delta_lu", "tolerance_lu"])},
+        "fair_loudness_match": schema({"target_lufs": {"type": "number", "minimum": -70, "maximum": 0}}, ["target_lufs"]),
+        "window_step_seconds": {"type": "number", "minimum": 0.001, "maximum": 120},
+        "window_seconds": masking_properties["window_seconds"], "max_windows": masking_properties["max_windows"],
+    }
+    def live_audio_balance(args):
+        from audio_balance import analyze_balance
+        return analyze_balance(args)
+
+    server.add_tool(Tool("live_audio_balance", "Offline aligned programme/parts loudness, section expectations and modeled prominence. Explicit evidence and listening condition required; see AGENTS.md.", schema({
+        "programme": schema({"name": {"type": "string"}, "path": {"type": "string"}}, ["path"]),
+        "parts": {"type": "array", "minItems": 1, "maxItems": 8, "items": masking_source},
+        "alignment": masking_properties["alignment"], "provenance": masking_properties["provenance"],
+        **balance_options,
+    }, ["programme", "parts", "alignment", "provenance", "listening_condition"]), live_audio_balance))
+    def live_audio_assess(args):
+        from audio_assessment import assess_audio
+        return assess_audio(args)
+
+    server.add_tool(Tool("live_audio_assess", "Offline balance/masking assessment of a complete qualified in-mix manifest; rejects raw or unverified captures. See AGENTS.md.", schema({
+        "manifest_path": {"type": "string"},
+        "gains_db": {"type": "object", "additionalProperties": {"type": "number", "minimum": -60, "maximum": 60}},
+        **balance_options,
+    }, ["manifest_path", "listening_condition"]), live_audio_assess))
     server.add_tool(Tool("live_visual_capture", VISUAL_CAPTURE_DESCRIPTION, loose_schema(), lambda args: capture_ableton_window(
         output_path=args.get("output_path"),
         title_contains=args.get("title_contains"),
