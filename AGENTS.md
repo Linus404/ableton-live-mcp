@@ -272,6 +272,54 @@ invalidates its applicability to future captures but does not erase historical
 offline evidence. Perceptual estimates still require explicit listener conditions
 and are not human approval.
 
+## Tonal balance analysis
+
+Use `live_audio_tonal` offline with required `source: {name,path,signal_path}`;
+optional `reference` has the same shape. Paths identify existing mono/stereo WAVs,
+not Live tracks. Optional source `sections` are `{name,start_seconds,end_seconds}`
+in file-relative seconds. `window_seconds` is 0.25–600; default adapts to duration,
+at most 120 contiguous source windows. Reference comparison always uses its whole
+independent passage, without inferred alignment or corresponding musical times.
+
+Optional `brief: {description,band_expectations?}` declares the musical goal and
+up to six `{band,min_relative_db,max_relative_db}` ranges (-120–0 dB). Supported
+bands are sub (20–60 Hz), bass (60–250), low_mid (250–500), mid (500–2000),
+upper_mid (2000–6000), high (6000–20000). Ranges are caller expectations, not
+universal targets. Above/below-brief facts are distinct from conditional muddiness/
+harshness interpretations and musical judgments. No brief means no expectation
+departure classification. Peaks are possible resonances or intended harmonics,
+not demonstrated faults or causes. Recurrence covers only measured non-silent
+windows and the top five qualifying local peaks, not all harmonics.
+For below-numerical-floor bands, measured relative power stays null; a conservative
+`upper_relative_db` may establish `below_brief` only with a non-silent analyzed
+total, full target-band coverage, and upper bound strictly below the minimum.
+Whole silence remains unavailable. Brief ranges refer to each file's Nyquist-
+covered normalization total; adapt expectations when that denominator changes.
+`complete` and `processing_complete` concern successful processing only. Require
+`spectrum_coverage_complete` before claiming full spectral passage coverage;
+read incomplete reasons and per-spectrum covered duration/omitted tail.
+
+Welch Hann 250 ms/50% overlap measures unweighted channel-mean power (not a mono
+fold), broadband/octave energy, centroid and 85% rolloff. Density is integrated
+by FFT-bin-cell overlap; 4 Hz nominal resolution cannot identify finer resonances.
+Intervals shorter than 250 ms have unavailable spectra; incomplete final Welch
+blocks are omitted, so transient/tail evidence has explicit limits. DC/out-of-band
+energy is excluded from tonal normalization but retained in original RMS/peak.
+Silent analyzed bands return null relative measures. Read Nyquist coverage:
+partial/unsupported bands are not missing treble; reference deltas require full
+band coverage and matching covered normalization intervals. Normalized spectral
+shape is gain-invariant, not perceived loudness. Original levels remain; reference
+LUFS-match gain and predicted sample peak are reported, never applied.
+
+Bounds: two WAVs, 128 MiB/600 seconds/12 million scalar samples per file,
+32 source sections, 96 million total sample-work units including decode, whole,
+local and repeated section intervals. Reuse the `audio-analysis` extra; no Live
+calls or mutation. Signal paths are caller-provided provenance, not qualification.
+Use retained qualified native programme/part files when in-mix provenance matters,
+and retain the original manifest/certificate externally. Raw taps support only
+their identified signal-point tonal observations. Do not infer masking, in-mix
+attribution, human approval or keep/revert recommendations from spectrum alone.
+
 ## Visual validation captures
 
 For M4L UI visual validation, use `live_visual_capture` or `ableton-live-mcp-capture-window` to capture only Ableton Live windows. This tool is never a general screenshot API: do not add arguments or workflows that capture arbitrary apps, monitors, desktops, browser windows, terminals, or user-selected window handles. The implementation must enumerate candidate OS windows, filter them to verified Ableton Live processes first, and only then apply optional title filters.

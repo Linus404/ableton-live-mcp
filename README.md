@@ -273,6 +273,53 @@ explicit/default assessment and independent acceptance review under the conditio
 in `AUDIO_FEATURES_VALIDATION.md`. Changed routing/profiles require recalibration.
 These tools reuse the `audio-analysis` extra.
 
+### Tonal balance evidence
+
+`live_audio_tonal` measures an identified mono/stereo WAV offline using the same
+`audio-analysis` extra. It returns absolute/relative broad-band and octave power,
+brightness (centroid/85% rolloff), prominent spectral peaks and their recurrence,
+whole-passage, named-section and contiguous local-window evidence. It does not
+prescribe a universal tonal curve or decide whether a sound is muddy or harsh.
+
+```json
+{
+  "source": {"name": "mix", "path": "mix.wav", "signal_path": "Exported Main after processing; bars 9–17"},
+  "reference": {"name": "reference", "path": "reference.wav", "signal_path": "Independent reference excerpt selected for similar instrumentation"},
+  "sections": [{"name": "first_half", "start_seconds": 0, "end_seconds": 4}],
+  "window_seconds": 1,
+  "brief": {
+    "description": "Keep bass weight, but avoid low-mid dominance relative to this selected reference",
+    "band_expectations": [{"band": "low_mid", "min_relative_db": -30, "max_relative_db": -10}]
+  }
+}
+```
+
+`reference`, `sections`, `window_seconds` and `brief` are optional. Brief ranges
+are caller-selected expectations in dB relative to covered 20 Hz–20 kHz power,
+not recommended defaults. Bands: sub 20–60, bass 60–250, low_mid 250–500,
+mid 500–2000, upper_mid 2000–6000 and high 6000–20000 Hz. Octave bands give
+additional descriptive resolution. Read coverage before interpreting missing
+energy: Nyquist-truncated bands are partial/unsupported. Reference comparisons
+require identical covered normalization ranges and full coverage of each band.
+Each band reports a measurement status. A below-numerical-floor band retains
+null measured energy and a conservative relative-power upper bound; it can be
+`below_brief` only when that bound is strictly below the stated minimum and
+the target band has full coverage. Whole-file silence remains unavailable.
+`complete`/`processing_complete` mean processing succeeded, not full spectral
+passage coverage. Check `spectrum_coverage_complete`, incomplete reasons and
+each spectrum's covered duration/omitted tail before interpreting end transients.
+
+Reference comparison uses independent whole-passage normalized spectral shapes;
+it needs no alignment assertion and does not compare corresponding musical times.
+Original LUFS/RMS/sample peaks remain intact; the reference gain needed to match
+source LUFS and predicted sample peak are reported without modifying audio.
+For before/after work, supply musically corresponding rendered passages and retain
+their acquisition/alignment evidence separately; this tool does not verify it.
+Use qualified retained programme or part WAVs from `live_audio_capture_in_mix`
+when appropriate, carrying their signal path into the source description. Raw
+tap files remain isolated signal-point evidence and cannot establish source
+contribution to the mix. See `AUDIO_TONAL_VALIDATION.md` for verification scope.
+
 ## Ideas
 
 - Control your external synthesizers and other hardware with the MCP
