@@ -152,6 +152,127 @@ rendered passages separately when assessing their measured levels; pre-mixer
 tap values cannot establish actual fader balance. Captured groups, returns, and
 master paths are never summed.
 
+### Audibility and masking evidence
+
+`live_audio_masking` compares a target with 1–8 competing **aligned, disjoint
+in-mix contributions**. It runs offline with the same `audio-analysis` extra.
+Supply explicit alignment evidence and signal-path provenance:
+
+```json
+{
+  "target": {"name": "lead", "path": "C:/audio/lead.wav"},
+  "competitors": [{"name": "pad", "path": "C:/audio/pad.wav"}],
+  "alignment": {"verified": true, "source": "Same-start aligned rendered contributions; latency compensated", "uncertainty_samples": 0},
+  "provenance": {"disjoint_contributions": true, "in_mix_levels": true, "signal_path": "Post-fader contributions at their actual mix gains, before shared bus processing"},
+  "window_seconds": 0.1,
+  "listening_condition": {"kind": "assumed", "db_spl_at_0_dbfs_rms": 100, "source": "Example monitor-level assumption, not measured calibration"}
+}
+```
+
+Those declarations must describe actual evidence; they do not make recordings
+aligned or turn pre-mixer taps into in-mix contributions. Raw
+`live_audio_capture` files do **not** currently satisfy this contract. Do not
+include a source alongside its containing group/master path, double-count shared
+returns, or use isolated loudness to claim audibility. The tool does not verify
+caller assertions or automatically resample, cross-correlate, or align files.
+
+Files must have identical sample rate and mono/stereo layout. Equal frame counts
+are required unless `alignment.offsets_samples` maps **every source name** to the
+file frame corresponding to common time zero. With offsets, analysis covers the
+shortest common remaining interval; outside audio is excluded. Optional source
+`gain_db` (−60 to +60) describes an explicit counterfactual, not an automatically
+loudness-matched comparison.
+
+The report retains auditory roex-filter powers and the descriptive excitation
+competition proxy. With `listening_condition`, it also estimates masking using
+an MPEG-1 Psychoacoustic Model 1 adaptation: tonal/noise masker classification,
+Bark spreading, absolute hearing threshold and target threshold margins. The SPL
+reference is measured (`calibrated`) or explicitly `assumed`, with evidence in
+`source`. Threshold excess is a spectral prominence indicator, **not standardized
+partial loudness or human listening approval**. Binaural/temporal masking,
+correlation/interference and shared nonlinear bus processing are not modeled.
+
+Windows are contiguous, 0.1–1 second, capped at 120 (`max_windows` may lower the
+cap). The tool refuses excessive counts instead of silently sampling sparsely.
+Final tails shorter than 100 ms are explicitly unmeasured. Other bounds are
+120 seconds/file, 12 million scalar samples/file, 48 million/request, and
+128 MiB/file. Follow report coverage and numerical-floor limitations; short
+edge transients and quiet target detail may be underrepresented.
+
+The report includes actual filter-center frequency coverage; centers do not
+uniformly cover extreme bass or upper treble, and roex filters have tails rather
+than hard band boundaries. A reported center is not an inferred source pitch or
+spectral peak. `inactive_target_windows` counts modeled filter inactivity, not
+literal WAV silence: Hann weighting can erase an impulse at a window endpoint.
+
+### Programme/parts balance and qualified capture assessment
+
+`live_audio_balance` accepts `programme: {name?,path}`, `parts: [{name,path,gain_db?}]`
+(1–8), the same alignment/provenance contract, and explicit listening conditions.
+It reports aligned integrated/local/section part-to-programme differences and
+separate modeled prominence/masking. Programme is a reference, never another
+competing contribution. `sections` use common file-relative seconds.
+`expected_section_differences` specifies `from_section`, `to_section`,
+`expected_delta_lu`, and `tolerance_lu`; only deviations from declared musical
+expectations receive a judgment. `fair_loudness_match: {target_lufs}` reports
+isolated comparison gain/peak implications without normalizing files or claiming
+that a louder scenario is better. Original measurements are retained.
+
+`live_audio_capture_in_mix` takes `start_beat`, `length_beats`, optional `track_refs`,
+`return_refs` (existing return-track refs), returns/master switches, pre/post-roll,
+`max_duration_seconds` and output directory. Omitting `return_refs` retains the
+default selection of all returns when returns are enabled.
+An empty list selects none; `return_refs` cannot be combined with
+`include_returns: false` (omit the selector when disabling returns).
+Selected return paths require measured role/routing-profile qualification; their timing is not inferred
+from regular-track calibration or discovered by searching each musical take.
+It records native Live clips on owned Post Mixer receivers and a separate Master
+Resampling programme. Native acquisition WAV copies are retained unchanged; a
+float64 interleaved derivative preserves their frames without gain/resampling.
+This derivative is not acquisition clock evidence. Supported topology and cleanup failures stay explicit.
+Experimental native qualification supports PCM24/PCM32 and float32/float64
+recording preferences. PCM16 remains available for offline file analysis and
+unqualified recording, but is explicitly unsupported for qualified capture and
+manifest assessment; a PCM24 certificate must not be reused for PCM16.
+Qualified PCM acquisition also rejects samples at either digital rail as possible
+clipping: a clipped part and programme can falsely satisfy a linear sum check.
+Finite floating-point samples above unity remain supported; the PCM rail guard
+is not a universal 0 dBFS threshold for floating-point recording.
+Start with stopped transport: capture plays one real-time passage, then restores
+the original stopped position and insertion marker. Restoring ongoing playback
+is unsupported until its distinct playback-cursor behavior is experimentally
+qualified.
+Physical qualification is required before treating files as aligned in-mix audio.
+
+`live_audio_capture_in_mix_calibrate` runs repeatable physical calibration with
+optional `output_directory`: it creates/removes owned calibration audio tracks
+and temporarily plays audio, preserving existing music. It requires stopped
+transport, no recording and no solos. A failed or unavailable qualification
+remains explicit; it never becomes a certificate from caller declarations.
+
+`live_audio_assess` accepts `manifest_path`, `listening_condition`, balance options
+and optional `gains_db: {captured_part_name: gain_db}`. Offline assessment requires
+complete files/cleanup, one programme plus 1–8 complete contributions, matching
+finalized metadata, verified alignment/disjoint in-mix provenance and a valid
+experimental qualification certificate. It refuses unsupported entries and legacy
+raw taps. After full qualification, a default partition may retain excluded
+nonterminal children only when the stable routing graph proves their actual
+output route reaches a captured terminal group. Explicitly requested exclusions,
+external/No Output paths, unknown routes and ambiguous group names are rejected;
+all exclusion evidence remains in the report.
+Unrequested MIDI-only control tracks may also remain explicit exclusions when
+their pinned, unchanged routing profile proves `has_audio_output: false`.
+Unknown capability and audio-capable silent/muted/frozen tracks are not covered
+by this exception; an explicitly requested non-audio source is rejected.
+Every stereo file must match its frame-for-frame channels in the retained
+finalized interleaved derivative (or explicitly normalized copy); raw normalization
+evidence remains in the report. Public calibration establishes applicable current-
+profile qualification; matching frames or caller booleans do not qualify a capture.
+The first two audio-understanding goals passed actual regular/group/return capture,
+explicit/default assessment and independent acceptance review under the conditions
+in `AUDIO_FEATURES_VALIDATION.md`. Changed routing/profiles require recalibration.
+These tools reuse the `audio-analysis` extra.
+
 ## Ideas
 
 - Control your external synthesizers and other hardware with the MCP

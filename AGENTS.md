@@ -64,6 +64,10 @@ Follow KISS, DRY, YAGNI, SoC, SRP, and PIE in implementation and review. Prefer 
 
 ## Repository operations
 
+When the user authorizes commits, commit completed, verified work before declaring
+the task finished. Split changes into logical commits, inspect the staged diff,
+and report the commit IDs; do not leave completed features uncommitted.
+
 Never push commits, branches, or tags to a remote without explicit user authorization.
 
 On Windows/PowerShell, do not use Bash heredocs such as `python - <<'PY'`; PowerShell treats `<` as redirection. For multiline Python, use a single-quoted here-string piped into Python: `@' ... '@ | python -`. Prefer this form for Live bridge scripts or nested JSON/code strings instead of fragile `python -c` quoting.
@@ -145,6 +149,128 @@ do not establish post-fader balance, final-delivery loudness, in-mix prominence,
 or masking. Do not compare supposedly corresponding local windows across raw
 captures: recorder timing/alignment remains unverified. The analyzer returns
 part-to-master comparison as unavailable instead of inventing aligned evidence.
+
+## Audibility and masking analysis
+
+Use `live_audio_masking` offline with `target: {name,path,gain_db?}`, 1–8
+`competitors` in the same format, required `alignment:
+{verified:true,source:<evidence>,uncertainty_samples:0}`, and `provenance:
+{disjoint_contributions:true,in_mix_levels:true,signal_path:<description>}`.
+The declarations are caller-supplied evidence, not independently verified facts.
+Do not mark raw uncalibrated capture files aligned or pre-mixer isolated taps as
+in-mix contributions. Reject overlapping source/group/master/return paths.
+
+Identical sample rates and mono/stereo layouts are required. Without
+`alignment.offsets_samples`, lengths must match; otherwise supply a file frame
+index at common time zero for every source name. Only the common remaining
+interval is analyzed. Source gains are explicit counterfactuals, not automatic
+normalization or fair loudness matching. Use aligned rendered contributions
+at actual in-mix gains with documented routing, avoiding shared path duplication.
+
+Read measured roex-filter powers/ratios/attribution separately from the ERB
+excitation competition proxy. The proxy and its >=0.5 interval rule do not prove
+that a part is buried; spectral competition does not establish human audibility.
+With explicit `listening_condition: {kind: "calibrated"|"assumed",
+db_spl_at_0_dbfs_rms, source}`, analysis additionally uses an MPEG-1 Psychoacoustic
+Model 1 adaptation with tonal/noise maskers, Bark-domain spreading, absolute
+hearing threshold and threshold margins. Preserve calibration evidence versus
+assumed monitor level. Threshold excess is a spectral prominence indicator, not
+standardized partial loudness, human audibility probability or listening approval.
+Binaural/temporal masking is unsupported. Incoherent competitor-power addition
+cannot represent correlations/interference or shared nonlinear bus processing.
+
+`window_seconds` is 0.1–1 (default 0.1), `max_windows` is 1–120 (default 120).
+Windows are contiguous; excessive window counts are rejected, and tails below
+100 ms are explicitly unmeasured. Respect coverage, numerical floors, and
+transient limitations. Bounds: 9 WAVs, 120 seconds/file, 12 million scalar
+samples/file, 48 million/request, 128 MiB/file. Reuse the `audio-analysis` extra;
+analysis never calls Live or changes its state.
+
+Read `method.frequency_coverage` for actual filter-center coverage; centers are
+not estimated source-frequency peaks, and roex tails are not hard band cutoffs.
+`inactive_target_windows` means modeled filter inactivity, not literal source
+silence. Hann endpoint weighting can suppress a real transient completely.
+
+## Qualified in-mix assessment
+
+`live_audio_capture_in_mix` records native Live audio clips from owned Post Mixer
+receivers and a separate Master Resampling programme. It retains acquisition WAV
+copies and constructs a float64 interleaved derivative without gain/resampling.
+The derivative is not a multichannel acquisition file or timing proof. Require
+stopped transport before capture; active-playback restoration is unsupported.
+Capture performs one real-time playback pass and restores the original stopped
+position and insertion marker. Arguments
+are `start_beat`, `length_beats`, optional track refs, returns/master switches,
+pre/post-roll, duration bound and directory, and
+optional `return_refs` selecting existing return-track refs (default all enabled
+returns; an empty list selects none). Do not combine `return_refs` with
+`include_returns: false`; omit the selector when disabling returns.
+Single-clock status and matching
+lengths do not establish routing/PDC calibration. Native recording epoch and
+signal-path timing require experimental qualification.
+Native physical qualification supports PCM24/PCM32 and float32/float64 recordings
+only. PCM16 is unsupported for qualification and `live_audio_assess`; the
+calibration/verification gate rejects it without loosening tolerances. Standalone
+offline PCM16 loudness/masking/balance analysis remains available.
+For qualified native PCM, samples `<= -1` or `>= 1 - LSB` are rejected as possible
+acquisition clipping: identical clipped contribution/programme files cannot prove
+linear in-mix provenance. Finite float samples above unity remain supported.
+The capture wrapper attaches qualification only through `in_mix_qualification.attach_qualification`, backed
+by measured Live experiments and a current certificate. Preserve qualification
+failure reasons and unsupported/incomplete outcomes.
+
+`live_audio_capture_in_mix_calibrate` delegates to repeatable physical calibration
+with optional `output_directory`. It creates/removes owned calibration audio
+tracks and temporarily plays audio while preserving existing music. Require
+stopped transport, no recording and no solos. Treat failure as unqualified;
+never manufacture a certificate or claim measured qualification from status flags.
+
+`live_audio_balance` is offline: `programme: {name?,path}`, `parts` (1–8 disjoint
+actual in-mix contributions, optional `gain_db`), alignment/provenance as above,
+and explicit listening condition. It combines BS.1770 programme/part levels,
+aligned local and section differences, and separate Model-1-adapted prominence
+estimates. `sections` use common-time seconds. Optional
+`expected_section_differences` declare `from_section`, `to_section`,
+`expected_delta_lu` and `tolerance_lu` (minimum 0.001 LU). Unexpected means outside that explicit
+expectation, never an automatic mixing error. `fair_loudness_match: {target_lufs}`
+reports isolated comparison gain and predicted sample-peak headroom without
+applying changes. Gain scenarios retain original evidence; programme is not
+recomputed through unknown nonlinear master processing.
+
+`live_audio_assess` adapts `manifest_path` plus listening/balance options and
+optional `gains_db` by captured contribution name. It calls
+`verify_qualification(manifest)` offline and requires complete capture/cleanup,
+verified zero-uncertainty alignment and disjoint actual in-mix provenance,
+exactly one program reference and 1–8 complete contributions, unique identities,
+consistent finalized WAV metadata and frame counts, and bounded frame-for-frame
+equality between retained files and their interleaved derivative channels using
+float64 reads (preserving PCM32 least-significant bits). When
+`normalized_interleaved_path` exists, verify that finalized copy and preserve
+the raw path and normalization evidence. Refuse unsupported or failed
+entries rather than silently reducing the mix. Preserve full capture evidence
+in the report. Legacy raw taps are rejected. Qualification availability and
+supported topology depend on physical validation, not declarations.
+After successful qualification, allow only intentional partition exclusions whose
+stable group-ID and actual output-route chain reaches a captured terminal group.
+Require retained exact selection provenance; explicitly requested exclusions,
+external/No Output paths, unpinned routes and ambiguous group names fail closed.
+Group membership or a matching Main sum alone is insufficient. Retain all
+excluded-source evidence.
+Unrequested non-audio controls may be excluded only when the stable profile's
+actual `has_audio_output` is strictly `false` for the pinned source ID. Retain
+their exclusion/selection/profile evidence. Unknown capability, silent or muted
+audio-capable sources and explicitly requested non-audio sources fail closed.
+The first-two-goal workflow passed actual regular/group/existing-return
+calibration, explicit/default MCP assessment and independent review under the
+conditions in `AUDIO_FEATURES_VALIDATION.md`: Windows English process-bound menu
+evidence, stopped transport, PDC enabled, Reduced Latency When Monitoring disabled,
+unprocessed unity Main and no existing armed/recording/automation-writing/solo
+state. Unknown SDK latency/track-delay fields remain null, not zero. Retained
+device/routing profiles and measured per-source offsets scope each certificate;
+changed profiles require applicable calibration. Removing the validation rig
+invalidates its applicability to future captures but does not erase historical
+offline evidence. Perceptual estimates still require explicit listener conditions
+and are not human approval.
 
 ## Visual validation captures
 

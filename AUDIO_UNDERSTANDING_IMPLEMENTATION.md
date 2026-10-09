@@ -1,5 +1,12 @@
 # Feature 1: loudness and balance evidence
 
+**Complete for the first-two-goal qualified workflow under its measured supported
+conditions.** Actual native regular/group/return acquisition and explicit/default
+MCP assessments passed independent review; the final combined suite passed
+465 tests and the original Live set was restored. See
+`AUDIO_FEATURES_VALIDATION.md` for retained evidence, conditions and recalibration
+requirements. Historical foundation experiments below are separate evidence.
+
 Implemented `live_audio_analyze`, an offline measurement tool for existing WAVs
 and `live_audio_capture` manifests. No audio AI model or running Live is needed
 for analysis. See README.md and AGENTS.md for arguments and measurement limits.
@@ -16,15 +23,63 @@ for analysis. See README.md and AGENTS.md for arguments and measurement limits.
 - Optional `audio-analysis` installation extra: NumPy, SoundFile, pyloudnorm.
   Core server startup remains independent of those optional imports.
 
-Measured loudness provides evidence about levels, not proof of perceived
-prominence in the mix. Intentional section contrast is not classified as a
-problem. Raw pre-mixer captures cannot establish fader balance, exact temporal
-correspondence, or final delivery loudness. Part-to-master comparisons therefore
-remain explicitly unavailable. LRA and true peak are unsupported; no proxy is
-substituted. This delivers the measurable loudness foundation of the first goal,
-not a complete perceptual balance or masking assessment.
+Measured loudness provides level evidence, not perceived prominence. Raw pre-mixer
+captures still cannot establish fader balance, temporal correspondence or delivery
+loudness, so `live_audio_analyze` keeps part-to-master comparisons unavailable.
+LRA and true peak are unsupported; no proxy is substituted.
 
-## Local validation
+## Complete workflow integration and qualification gate
+
+`live_audio_balance` adds aligned programme/part integrated, local and section
+loudness differences and separate Model-1-adapted prominence/masking estimates.
+It accepts 1–8 disjoint actual in-mix contributions plus a separate programme,
+verified alignment/provenance and explicit calibrated or assumed listening level.
+Section differences are judged only against `expected_section_differences`:
+from/to sections, expected LU contrast and tolerance. `fair_loudness_match`
+reports isolated comparison gain/peak headroom without applying it. Explicit
+gain scenarios retain original evidence and do not reconstruct nonlinear master
+processing or claim louder means better.
+
+`live_audio_capture_in_mix` records native Live clips on owned Post Mixer receivers
+and a separate Master Resampling programme. Original acquisition WAV copies are
+retained unchanged; a float64 interleaved derivative is constructed without
+gain/resampling and is not an acquisition clock proof.
+Capture requires stopped transport, performs one real-time passage, and restores
+the original stopped position and insertion marker. Active-playback restoration
+is unsupported; Live's playback cursor and stopped insertion position differ.
+`live_audio_assess`
+adapts its complete manifest offline, checks finalized WAV metadata/frame counts,
+rejects incomplete/unsupported entries, and calls `verify_qualification` before
+passing strict alignment/provenance to analysis. The wrapper attaches qualification
+only through an experimentally established current certificate. Matching clocks,
+file lengths and status declarations are insufficient evidence. Historical raw-tap
+experiments below do not qualify this new path; physical in-mix qualification and
+independent numerical/model review are required by `AUDIO_FEATURES_ACCEPTANCE.md`.
+
+Local integration check (2026-10-09): **228 passed** across
+`tests/test_audio_assessment.py`, `tests/test_audio_analysis_tool.py`,
+`tests/test_audio_masking_tool.py`, `tests/test_live_settings.py`, and
+`tests/test_mcp_server.py`; `git diff --check`
+passed. This checks discoverable schemas, offline dispatch, strict refusal of
+unqualified/incomplete/inconsistent manifests and a real offline balance run.
+The adapter validates the actual finalized interleaved recording (preferring
+`normalized_interleaved_path` when present) and checks bounded frame-for-frame
+split-channel equality, refusing same-metadata file replacement. Full raw and
+normalization evidence is retained.
+Test qualification proofs are explicitly mocked; they are not Live certificates.
+The adapter uses float64 channel comparisons to preserve native PCM32 least-
+significant bits and accepts supported native PCM and float acquisition formats.
+Physical qualification is limited to PCM24/PCM32 and float32/float64: native
+PCM16 is rejected by calibration/current-sum qualification, while standalone
+offline PCM16 file analysis remains available. No tolerance relaxation substitutes
+for the unsupported acquisition format.
+The Windows-only read-only menu helper dynamically discovers English native
+Options labels and verifies the Ableton process/window before and after reading
+PDC/RLWM checkbox states. Unsupported menus/platforms return unknown settings;
+test probes are mocked. Real menu evidence can establish observed preference
+state, not physical acquisition epoch or routing calibration.
+
+## Historical loudness-foundation validation
 
 2026-10-08, Windows, Python virtual environment in this checkout:
 
