@@ -386,6 +386,27 @@ def make_server(client: AbletonBridgeClient | None = None) -> StdioMcpServer:
             }, ["band", "min_relative_db", "max_relative_db"])},
         }, ["description"]),
     }, ["source"]), live_audio_tonal))
+    def live_audio_dynamics(args):
+        from audio_dynamics import analyze_dynamics
+        return analyze_dynamics(args)
+
+    server.add_tool(Tool("live_audio_dynamics", "Offline WAV dynamics: crest, transient attack/body/tail, envelope modulation and aligned processing comparisons. Measurements are not perceived punch or pumping diagnosis; see AGENTS.md.", schema({
+        "source": tonal_source, "comparison": tonal_source,
+        "alignment": schema({
+            "verified": {"type": "boolean", "const": True}, "source": {"type": "string"},
+            "uncertainty_samples": {"type": "integer", "const": 0},
+            "offsets_samples": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 0}},
+        }, ["verified", "source", "uncertainty_samples"]),
+        "sections": audio_sections,
+        "events": {"type": "array", "maxItems": 120, "items": schema({
+            "name": {"type": "string"}, "start_seconds": {"type": "number", "minimum": 0},
+            "attack_end_seconds": {"type": "number", "exclusiveMinimum": 0},
+            "body_end_seconds": {"type": "number", "exclusiveMinimum": 0},
+            "end_seconds": {"type": "number", "exclusiveMinimum": 0},
+        }, ["name", "start_seconds", "attack_end_seconds", "body_end_seconds", "end_seconds"])},
+        "window_seconds": {"type": "number", "minimum": 0.01, "maximum": 600},
+        "brief": schema({"description": {"type": "string"}}, ["description"]),
+    }, ["source"]), live_audio_dynamics))
     masking_properties = {
         "target": masking_source,
         "competitors": {"type": "array", "minItems": 1, "maxItems": 8, "items": masking_source},
