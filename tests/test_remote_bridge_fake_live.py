@@ -1584,7 +1584,7 @@ def test_transport_stop_reports_requested_state_when_live_property_lags(monkeypa
         "raw_playing": True,
         "settled": False,
     }
-    assert calls == ["stop", "stop"]
+    assert calls == ["stop"]
 
 
 def test_transport_play_reports_requested_state_when_live_property_lags(monkeypatch):
