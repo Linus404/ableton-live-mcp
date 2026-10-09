@@ -365,6 +365,27 @@ def make_server(client: AbletonBridgeClient | None = None) -> StdioMcpServer:
         "name": {"type": "string"}, "start_seconds": {"type": "number", "minimum": 0},
         "end_seconds": {"type": "number", "exclusiveMinimum": 0},
     }, ["name", "start_seconds", "end_seconds"])}
+    def live_audio_tonal(args):
+        from audio_tonal import analyze_tonal
+        return analyze_tonal(args)
+
+    tonal_source = schema({
+        "name": {"type": "string"}, "path": {"type": "string"},
+        "signal_path": {"type": "string", "description": "Identified recording/routing point; caller evidence, not qualification."},
+    }, ["name", "path", "signal_path"])
+    server.add_tool(Tool("live_audio_tonal", "Offline WAV tonal evidence: band energy, brightness, persistent spectral peaks, local/section and explicit brief/reference comparisons. No universal EQ targets; see AGENTS.md.", schema({
+        "source": tonal_source, "reference": tonal_source,
+        "sections": audio_sections,
+        "window_seconds": {"type": "number", "minimum": 0.25, "maximum": 600, "description": "Contiguous local windows, at most 120 per file; default adapts to duration."},
+        "brief": schema({
+            "description": {"type": "string"},
+            "band_expectations": {"type": "array", "maxItems": 6, "description": "Relative to each file's Nyquist-covered 20–20000 Hz total power. Full target-band coverage required; adapt ranges if normalization coverage changes.", "items": schema({
+                "band": {"type": "string", "enum": ["sub", "bass", "low_mid", "mid", "upper_mid", "high"]},
+                "min_relative_db": {"type": "number", "minimum": -120, "maximum": 0},
+                "max_relative_db": {"type": "number", "minimum": -120, "maximum": 0},
+            }, ["band", "min_relative_db", "max_relative_db"])},
+        }, ["description"]),
+    }, ["source"]), live_audio_tonal))
     masking_properties = {
         "target": masking_source,
         "competitors": {"type": "array", "minItems": 1, "maxItems": 8, "items": masking_source},
