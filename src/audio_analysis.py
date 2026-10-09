@@ -57,7 +57,7 @@ def _measure(data, rate, meter, np):
     }
 
 
-def _analyze_file(path, sections, step, np, sf, pyln, budget):
+def _analyze_file(path, sections, step, np, sf, pyln, budget, *, offset_frames=0, common_frames=None, gain_db=0):
     metadata = validate_wav(path)
     rate, channels = metadata["sample_rate"], metadata["channels"]
     if channels not in (1, 2):
@@ -71,11 +71,14 @@ def _analyze_file(path, sections, step, np, sf, pyln, budget):
     with sf.SoundFile(str(path)) as handle:
         if (handle.frames, handle.samplerate, handle.channels) != (metadata["frames"], rate, channels):
             raise ValueError("decoder and WAV metadata disagree")
-        data = handle.read(metadata["frames"], dtype="float64", always_2d=True)
-    if len(data) != metadata["frames"]:
+        handle.seek(offset_frames)
+        requested_frames = common_frames if common_frames is not None else metadata["frames"]
+        data = handle.read(requested_frames, dtype="float64", always_2d=True)
+    if len(data) != requested_frames:
         raise ValueError("WAV changed or was truncated during decoding")
     if not np.isfinite(data).all() or np.max(np.abs(data)) > 1e6:
         raise ValueError("audio contains nonfinite or unreasonably large samples")
+    data *= 10 ** (gain_db / 20)
     duration = len(data) / rate
     effective_step = step if step is not None else max(0.1, duration / MAX_WINDOWS)
     if duration / effective_step > MAX_WINDOWS + 1e-9:
