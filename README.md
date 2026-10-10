@@ -364,6 +364,37 @@ when either integrated LUFS is unavailable. Sample peak is not true peak, DC
 is retained, and lower crest alone does not establish lost musical impact.
 See `AUDIO_DYNAMICS_VALIDATION.md` for the current verification ledger.
 
+### Compatibility, stereo, integrity and musical development
+
+Four additional offline tools use existing WAVs and the `audio-analysis` extra:
+
+| Tool | Evidence |
+| --- | --- |
+| `live_audio_compatibility` | Aligned source competition, timing coactivity, resolved partial relationships, modeled roughness and optional listening-conditioned prominence. |
+| `live_audio_stereo` | Frequency-dependent mid/side width, L/R phase relationships, arithmetic mono-fold cancellation and optional aligned contribution prominence changes. |
+| `live_audio_integrity` | Oversampled true-peak estimate, sample-rail observations, DC, silence/discontinuity candidates and explicit final-file delivery constraints. |
+| `live_audio_development` | Named-section balance, activity-density proxies, dynamics and contrasts against explicit expectations. |
+
+Sources identify `{name, path, signal_path}`. Sections are named file-relative
+second intervals; aligned multiple-source analysis instead uses common-time
+seconds. Stereo and integrity accept standalone sources. Compatibility needs
+aligned actual in-mix sources; stereo contribution analysis additionally requires
+alignment and provenance. Development requires explicit sections and can attach
+existing balance evidence. Read each discovered input schema for its options.
+
+Alignment declarations must retain actual evidence: equal file lengths do not
+prove alignment. Important-part prominence requires disjoint actual in-mix
+contributions and explicit calibrated or assumed listening conditions. Raw taps
+cannot establish post-fader balance or synchronized contributions. Results retain
+original levels, numerical floors, incomplete coverage and unavailable outcomes.
+No files are modified. Roughness does not mean bad sound; width is not translation
+approval; click/silence candidates do not establish unintended edits; louder or
+denser sections do not automatically improve music. Delivery targets and section
+expectations come from the caller, not universal defaults.
+
+See `AUDIO_REMAINING_FEATURES_PLAN.md` for goal acceptance and
+`AUDIO_REMAINING_FEATURES_VALIDATION.md` for the validation ledger.
+
 ## Ideas
 
 - Control your external synthesizers and other hardware with the MCP

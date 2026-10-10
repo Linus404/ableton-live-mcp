@@ -59,6 +59,10 @@ def test_lists_general_purpose_tools():
         "live_track_insert_device",
         "live_agent_audio_tap",
         "live_agent_audio_tap_setup",
+        "live_audio_compatibility",
+        "live_audio_stereo",
+        "live_audio_integrity",
+        "live_audio_development",
         "live_visual_capture",
         "live_agent_m4l_device",
         "live_agent_m4l_cleanup",
@@ -91,6 +95,46 @@ def test_all_tools_expose_object_input_schemas():
         or tool["inputSchema"].get("type") != "object"
     ]
     assert not bad, f"tools advertise non-object inputSchema: {bad}"
+
+
+@pytest.mark.parametrize("feature", ["compatibility", "stereo", "integrity", "development"])
+def test_remaining_audio_tools_dispatch_offline(monkeypatch, feature):
+    import importlib
+    module = importlib.import_module(f"audio_{feature}")
+    source = {"name": "test", "path": "existing.wav", "signal_path": "identified test path"}
+    args = {"source": source}
+    if feature == "compatibility":
+        args = {"target": source, "competitors": [{**source, "name": "other"}],
+            "alignment": {"verified": True, "source": "retained alignment evidence", "uncertainty_samples": 0},
+            "provenance": {"disjoint_contributions": True, "in_mix_levels": True, "signal_path": "disjoint render"}}
+    if feature == "development":
+        args["sections"] = [{"name": "a", "start_seconds": 0, "end_seconds": 1},
+            {"name": "b", "start_seconds": 1, "end_seconds": 2}]
+    monkeypatch.setattr(module, f"analyze_{feature}", lambda value: {"received": value})
+    bridge = FakeBridge()
+    response = make_server(bridge).handle({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": {"name": f"live_audio_{feature}", "arguments": args}})
+    assert "result" in response, response
+    assert json.loads(response["result"]["content"][0]["text"]) == {"received": args}
+    assert not bridge.calls
+
+
+def test_audio_tool_discovery_without_optional_dependencies():
+    code = """
+import builtins
+real_import = builtins.__import__
+def lean_import(name, *args, **kwargs):
+    if name.split('.')[0] in {'numpy', 'scipy', 'soundfile', 'pyloudnorm'}:
+        raise ImportError('optional dependency deliberately unavailable')
+    return real_import(name, *args, **kwargs)
+builtins.__import__ = lean_import
+from server import make_server
+tools = make_server(None).handle({'jsonrpc':'2.0','id':1,'method':'tools/list'})['result']['tools']
+assert all(any(t['name'] == 'live_audio_' + f for t in tools) for f in ('compatibility','stereo','integrity','development'))
+"""
+    env = {**os.environ, "PYTHONPATH": str(Path(server_module.__file__).parent)}
+    result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=env)
+    assert result.returncode == 0, result.stderr
 
 
 def test_add_tool_rejects_non_object_input_schema():
@@ -2484,7 +2528,7 @@ def test_tool_list_stays_compact():
     server = make_server(FakeBridge())
     response = server.handle({"jsonrpc": "2.0", "id": 7, "method": "tools/list"})
     payload = json.dumps(response, separators=(",", ":"))
-    assert len(payload) < 32000  # Includes qualified capture, balance, assessment, tonal and dynamics schemas.
+    assert len(payload) < 46000  # Includes all eight bounded audio-understanding feature schemas.
     live_eval = next(tool for tool in response["result"]["tools"] if tool["name"] == "live_eval")
     assert "live_exec" in live_eval["description"]
     assert "duplicate session clips" not in live_eval["description"].lower()
