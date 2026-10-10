@@ -379,6 +379,45 @@ Bounds: two WAVs, 128 MiB/600 seconds/12 million scalar samples/file, mono/stere
 Reuse `audio-analysis`; no Live calls or state mutations. Read
 `AUDIO_DYNAMICS_VALIDATION.md` for actual numerical/physical acceptance evidence.
 
+## Remaining offline audio-understanding tools
+
+`live_audio_compatibility`, `live_audio_stereo`, `live_audio_integrity` and
+`live_audio_development` analyze existing WAVs only. Install the same
+`audio-analysis` extra; analysis never calls Live or changes its state.
+Use their discovered schemas and the exact contracts in
+`AUDIO_REMAINING_FEATURES_PLAN.md`; numerical and physical acceptance evidence
+belongs in `AUDIO_REMAINING_FEATURES_VALIDATION.md`.
+
+Identify every source with `{name,path,signal_path}` and retain routing/acquisition
+evidence externally. Sections use file-relative seconds, or common-time seconds
+for explicitly aligned sources. Bounds and omitted coverage are feature-specific;
+processing success does not mean exhaustive coverage or physical qualification.
+Retain null/floor-limited and unsupported results instead of inventing evidence.
+
+Compatibility estimates distinguish frequency competition, timed coactivity,
+resolved spectral-partial relationships and modeled roughness. Resolved partials
+are not fundamental pitch/chord recognition, and roughness is not musical quality.
+Prominence estimates do not prove whether humans distinguish parts.
+
+Stereo evidence includes frequency-dependent mid/side and phase observations plus
+an explicitly defined arithmetic mono fold. Important-part stereo/mono prominence
+comparison requires aligned disjoint actual in-mix target/competitors, explicit
+listening conditions and programme alignment. Single-source width/cancellation
+does not establish source attribution or important-part audibility.
+
+Integrity reports oversampled true-peak estimates separately from sample peaks,
+PCM rail/float unity observations separately from proven clipping, channel DC and
+timed silence/discontinuity candidates separately from intentional musical edits.
+Final-file delivery checks use caller requirements and the identified file's
+metadata/levels. Interpolation limits and boundary/tail uncertainty remain explicit;
+the estimate is not a certified delivery meter. No automatic repair is performed.
+
+Development requires explicit named sections and reuses tonal/dynamics evidence,
+with optional existing balance analysis. Activity density is a disclosed signal
+proxy, not a note count or arrangement interpretation. Section differences are
+observations until caller expectations declare a departure. Keep original levels
+and intended contrasts; no automatic keep/revert or human approval follows.
+
 ## Visual validation captures
 
 For M4L UI visual validation, use `live_visual_capture` or `ableton-live-mcp-capture-window` to capture only Ableton Live windows. This tool is never a general screenshot API: do not add arguments or workflows that capture arbitrary apps, monitors, desktops, browser windows, terminals, or user-selected window handles. The implementation must enumerate candidate OS windows, filter them to verified Ableton Live processes first, and only then apply optional title filters.

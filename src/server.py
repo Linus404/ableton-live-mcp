@@ -407,6 +407,19 @@ def make_server(client: AbletonBridgeClient | None = None) -> StdioMcpServer:
         "window_seconds": {"type": "number", "minimum": 0.01, "maximum": 600},
         "brief": schema({"description": {"type": "string"}}, ["description"]),
     }, ["source"]), live_audio_dynamics))
+    import audio_compatibility
+    import audio_stereo
+    import audio_integrity
+    import audio_development
+
+    for module, name, description in (
+        (audio_compatibility, "compatibility", "Offline aligned sound interactions: competition, coactivity, resolved partial relationships and roughness; not human distinguishability. See AGENTS.md."),
+        (audio_stereo, "stereo", "Offline stereo width/phase, arithmetic mono cancellation and optional qualified contribution prominence changes; see AGENTS.md."),
+        (audio_integrity, "integrity", "Offline true-peak estimate, DC, rails, silence/edit candidates and caller-defined final-file delivery checks; see AGENTS.md."),
+        (audio_development, "development", "Offline named-section balance, density proxies, dynamics and explicit contrast expectations; no universal musical targets. See AGENTS.md."),
+    ):
+        server.add_tool(Tool(f"live_audio_{name}", description,
+            schema(module.tool_properties(), module.TOOL_REQUIRED), getattr(module, f"analyze_{name}")))
     masking_properties = {
         "target": masking_source,
         "competitors": {"type": "array", "minItems": 1, "maxItems": 8, "items": masking_source},
