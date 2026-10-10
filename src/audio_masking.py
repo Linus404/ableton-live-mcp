@@ -12,6 +12,20 @@ MAX_WINDOWS = 120
 POWER_FLOOR = 1e-20
 
 
+def _model_power(data, np):
+    size = 1024
+    if len(data) < size:
+        return None
+    starts = list(range(0, len(data) - size + 1, 512))
+    if starts[-1] != len(data) - size:
+        starts.append(len(data) - size)
+    window = np.hanning(size)
+    power = sum(np.abs(np.fft.rfft(data[pos:pos + size] * window[:, None], axis=0)) ** 2 for pos in starts)
+    power /= len(starts) * size * np.sum(window ** 2)
+    power[1:-1] *= 2
+    return power
+
+
 def _listening_condition(value):
     if not isinstance(value, dict) or set(value) != {"kind", "db_spl_at_0_dbfs_rms", "source"}:
         raise ValueError("listening_condition requires kind, db_spl_at_0_dbfs_rms and source")
@@ -243,7 +257,6 @@ def analyze_masking(args, *, frame_limit=None, spectral_cache=None, allow_no_com
     kernels = {}
     spectra = []
     model_spectra = []
-    model_window = np.hanning(1024)
     model_frequencies = np.fft.rfftfreq(1024, 1 / rate)
     for path, m, name, gain in zip(paths, metadata, names, gains):
         stat = path.stat()
@@ -271,16 +284,9 @@ def analyze_masking(args, *, frame_limit=None, spectral_cache=None, allow_no_com
                     # Average overlapping short-frame spectra, not a single long FFT.
                     # A final edge-aligned frame covers the end; subframe variability
                     # is not represented by the stationary-window estimate.
-                    starts = list(range(0, length - 1024 + 1, 512))
-                    if not starts:
+                    bins = _model_power(data, np)
+                    if bins is None:
                         raise ValueError("perceptual model requires at least 1024 samples per window")
-                    if starts[-1] != length - 1024:
-                        starts.append(length - 1024)
-                    bins = np.zeros((513, channels))
-                    for pos in starts:
-                        bins += np.abs(np.fft.rfft(data[pos:pos + 1024] * model_window[:, None], axis=0)) ** 2
-                    bins /= len(starts) * 1024 * np.sum(model_window ** 2)
-                    bins[1:-1] *= 2
                     model_powers.append(bins)
                 if length not in kernels:
                     window = np.hanning(length)
