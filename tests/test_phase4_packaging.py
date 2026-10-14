@@ -43,7 +43,7 @@ def test_real_distributions_and_installed_runtime(tmp_path):
     source_dir = tmp_path / "source"
     with tarfile.open(sdist) as archive:
         prefix = archive.getnames()[0].split("/")[0]
-        for name in ("README.md", "WORKFLOWS.md", "RELEASE_ACCEPTANCE.md", "pyproject.toml"):
+        for name in ("README.md", "WORKFLOWS.md", "pyproject.toml"):
             assert archive.extractfile(prefix + "/" + name).read() == (ROOT / name).read_bytes()
         archive.extractall(source_dir, filter="data")
     rebuilt = tmp_path / "rebuilt"

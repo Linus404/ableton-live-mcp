@@ -1,14 +1,7 @@
 from __future__ import annotations
 
-import importlib.util
 import threading
-from pathlib import Path
-
-
-path = Path(__file__).resolve().parents[1] / "scripts" / "benchmark_phase2_scheduling.py"
-spec = importlib.util.spec_from_file_location("phase2_scheduling", path)
-model = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(model)
+import scheduling_model as model
 
 
 def test_framework_negative_delay_costs_one_extra_tick():

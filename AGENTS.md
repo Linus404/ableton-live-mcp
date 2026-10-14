@@ -285,9 +285,8 @@ Unrequested non-audio controls may be excluded only when the stable profile's
 actual `has_audio_output` is strictly `false` for the pinned source ID. Retain
 their exclusion/selection/profile evidence. Unknown capability, silent or muted
 audio-capable sources and explicitly requested non-audio sources fail closed.
-The first-two-goal workflow passed actual regular/group/existing-return
-calibration, explicit/default MCP assessment and independent review under the
-conditions in `AUDIO_FEATURES_VALIDATION.md`: Windows English process-bound menu
+Regular/group/existing-return calibration and explicit/default MCP assessment
+have physical validation under these conditions: Windows English process-bound menu
 evidence, stopped transport, PDC enabled, Reduced Latency When Monitoring disabled,
 unprocessed unity Main and no existing armed/recording/automation-writing/solo
 state. Unknown SDK latency/track-delay fields remain null, not zero. Retained
@@ -401,17 +400,16 @@ not exhaustive event coverage or acquisition qualification.
 
 Bounds: two WAVs, 128 MiB/600 seconds/12 million scalar samples/file, mono/stereo
 8–192 kHz, 96 million reserved sample-work including repeated regions/envelopes.
-Reuse `audio-analysis`; no Live calls or state mutations. Read
-`AUDIO_DYNAMICS_VALIDATION.md` for actual numerical/physical acceptance evidence.
+Reuse `audio-analysis`; no Live calls or state mutations. Local analysis success
+does not establish acquisition qualification or physical alignment.
 
 ## Remaining offline audio-understanding tools
 
 `live_audio_compatibility`, `live_audio_stereo`, `live_audio_integrity` and
 `live_audio_development` analyze existing WAVs only. Install the same
 `audio-analysis` extra; analysis never calls Live or changes its state.
-Use their discovered schemas and the exact contracts in
-`AUDIO_REMAINING_FEATURES_PLAN.md`; numerical and physical acceptance evidence
-belongs in `AUDIO_REMAINING_FEATURES_VALIDATION.md`.
+Use their discovered schemas and the user-facing contracts in README.md;
+numerical processing success does not establish physical acquisition qualification.
 
 Identify every source with `{name,path,signal_path}` and retain routing/acquisition
 evidence externally. Sections use file-relative seconds, or common-time seconds

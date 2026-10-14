@@ -10,9 +10,11 @@ Just tell your AI agent (Codex, Claude Code, Cursor, Copilot, Gemini, etc.) to:
 
 `Set up the https://github.com/Linus404/ableton-live-mcp MCP server for me`
 
-Current cumulative acceptance includes Ableton Live 12.4.6 on Windows, with
-earlier upstream Live Suite 12.3.8/macOS Tahoe coverage. See
-[RELEASE_ACCEPTANCE.md](RELEASE_ACCEPTANCE.md) for tested scope and limits.
+Current physical validation covers Ableton Live 12.4.6 on Windows; earlier
+upstream coverage includes Live Suite 12.3.8 on macOS Tahoe. Existing-note
+transformations were physically verified for Session MIDI clips; Arrangement
+transformations have local regression coverage only. Required native undo grouping
+is limited to track mute; it is not an atomic transaction or a note-undo guarantee.
 
 For a reproducible checkout installation (Python 3.10+):
 
@@ -138,9 +140,8 @@ reconstructed from metadata. Recovery refuses invalid identity, missing targets
 and touched-value conflicts before editing.
 
 See [WORKFLOWS.md](WORKFLOWS.md) for schemas, examples, native units, undo/recovery
-limits and failure handling. Physical acceptance scope is retained in
-[ORCHESTRATION_PHASE_3_HANDOFF.md](ORCHESTRATION_PHASE_3_HANDOFF.md). General LOM,
-M4L and qualified audio tools retain their existing contracts.
+limits and failure handling. General LOM, M4L and qualified audio tools retain
+their existing contracts.
 
 ## Demos
 Here are a couple examples of live sets made from scratch with Codex in just a few minutes, along with their prompts. After it makes something, you can ask for follow up changes.
@@ -221,7 +222,6 @@ stems. Mixer automation cannot be reconstructed from a settings snapshot.
 In the Live 12.4.6 disposable-set check, source taps retained signal with their
 track faders at zero or tracks muted, and the master tap retained signal with the
 master fader at zero. These recordings must not be treated as final-output stems.
-See `AUDIO_CAPTURE_IMPLEMENTATION.md` for measured evidence and timing limitations.
 
 Local regression tests do not establish Live recording, headroom, pass-through,
 or timing accuracy. Those require a current-runtime Live experiment with known
@@ -390,9 +390,11 @@ Every stereo file must match its frame-for-frame channels in the retained
 finalized interleaved derivative (or explicitly normalized copy); raw normalization
 evidence remains in the report. Public calibration establishes applicable current-
 profile qualification; matching frames or caller booleans do not qualify a capture.
-The first two audio-understanding goals passed actual regular/group/return capture,
-explicit/default assessment and independent acceptance review under the conditions
-in `AUDIO_FEATURES_VALIDATION.md`. Changed routing/profiles require recalibration.
+Physical in-mix qualification has been verified for regular tracks, groups and
+existing returns on Windows with stopped transport, PDC enabled, Reduced Latency
+When Monitoring disabled, an unprocessed unity Main, and no existing armed,
+recording, automation-writing or solo state. Retain current device/routing profiles
+and measured per-source offsets; changed profiles require recalibration.
 These tools reuse the `audio-analysis` extra.
 
 ### Tonal balance evidence
@@ -440,7 +442,7 @@ their acquisition/alignment evidence separately; this tool does not verify it.
 Use qualified retained programme or part WAVs from `live_audio_capture_in_mix`
 when appropriate, carrying their signal path into the source description. Raw
 tap files remain isolated signal-point evidence and cannot establish source
-contribution to the mix. See `AUDIO_TONAL_VALIDATION.md` for verification scope.
+contribution to the mix.
 
 ### Dynamics and impact evidence
 
@@ -484,7 +486,6 @@ processing. Before/after deltas retain original levels and separately predict
 LUFS-matched levels/headroom; no files are rewritten. Matching is unavailable
 when either integrated LUFS is unavailable. Sample peak is not true peak, DC
 is retained, and lower crest alone does not establish lost musical impact.
-See `AUDIO_DYNAMICS_VALIDATION.md` for the current verification ledger.
 
 ### Compatibility, stereo, integrity and musical development
 
@@ -513,9 +514,6 @@ No files are modified. Roughness does not mean bad sound; width is not translati
 approval; click/silence candidates do not establish unintended edits; louder or
 denser sections do not automatically improve music. Delivery targets and section
 expectations come from the caller, not universal defaults.
-
-See `AUDIO_REMAINING_FEATURES_PLAN.md` for goal acceptance and
-`AUDIO_REMAINING_FEATURES_VALIDATION.md` for the validation ledger.
 
 ## Ideas
 

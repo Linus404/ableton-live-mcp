@@ -236,6 +236,7 @@ entries have no whole-workflow compensation promise. Recovery itself has retaine
 prefix/uncertainty evidence and linked history; incomplete/uncertain recovery must
 not be blindly repeated.
 
-Physical acceptance evidence and scope limitations belong to
-`ORCHESTRATION_PHASE_3_HANDOFF.md`; local fake-backed checks do not establish real
-Live grouping or replacement behavior.
+Physical validation is scoped to Windows Live12.4.6. Session MIDI transformations
+were verified in Live; Arrangement transformations have local regression coverage
+only. Local fake-backed checks do not establish universal native grouping or set
+replacement behavior.
