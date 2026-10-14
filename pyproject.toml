@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "ableton-live-mcp"
-version = "0.1.1"
+dynamic = ["version"]
 description = "General-purpose MCP bridge for Ableton Live's object model."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -41,6 +41,9 @@ ableton-live-mcp-capture-window = "visual_capture:main"
 testpaths = ["tests"]
 pythonpath = ["src"]
 
+[tool.hatch.version]
+path = "src/server.py"
+
 [tool.hatch.build.targets.wheel]
 only-include = ["src", "m4l", "scripts"]
 sources = ["src"]
@@ -56,6 +59,8 @@ include = [
     "/scripts",
     "/tests",
     "/README.md",
+    "/WORKFLOWS.md",
+    "/RELEASE_ACCEPTANCE.md",
     "/LICENSE",
     "/pyproject.toml",
 ]

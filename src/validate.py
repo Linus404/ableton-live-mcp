@@ -211,9 +211,28 @@ def mcp_tool_schema_status() -> dict:
         "live_ping": {
             "properties": ["timeout"],
         },
+        "live_agent_audio_tap_setup": {"properties": ["target_track", "placement", "solo_track", "isolated", "remove_existing", "stop", "reset_time"]},
+        "live_audio_capture": {"properties": ["start_beat", "length_beats", "track_refs", "include_returns", "include_master", "precision", "sample_aligned"], "required": ["start_beat", "length_beats"]},
+        "live_agent_m4l_device": {"properties": ["patch", "spec", "webui", "webuis", "values", "parameters", "target_track", "load", "build", "wait_status", "preflight_only", "status_state_keys"]},
+        "live_agent_m4l_cleanup": {"properties": ["delete", "target_track", "name_prefix", "role", "max_delete"]},
+        "live_visual_capture": {"properties": ["backend", "region", "crop", "max_width", "max_height", "list_only"]},
+        "live_max_console_capture": {"properties": ["backend", "display", "crop", "list_only"]},
+        "live_audio_capture_in_mix": {"properties": ["track_refs", "return_refs", "include_returns"], "required": ["start_beat", "length_beats"]},
+        "live_audio_analyze": {"properties": ["path", "manifest_path", "sections"]},
+        "live_audio_masking": {"required": ["target", "competitors", "alignment", "provenance"]},
+        "live_audio_balance": {"required": ["programme", "parts", "alignment", "provenance", "listening_condition"]},
+        "live_audio_assess": {"required": ["manifest_path", "listening_condition"]},
+        "live_batch": {"properties": ["operations", "continue_on_error", "expected_set_signature"], "required": ["operations"]},
+        "live_workflow": {"properties": ["mode", "operations", "label", "context", "snapshot_id", "expected_set_signature", "undo"], "required": ["mode", "operations"], "enums": {"mode": ["plan", "apply"], "undo": ["none", "group_if_supported", "required_group"]}},
+        "live_snapshot": {"properties": ["scope", "context"]},
+        "live_snapshot_diff": {"properties": ["before_id", "after_id"], "required": ["before_id", "after_id"]},
+        "live_workflow_history": {"properties": ["action", "workflow_id", "limit"], "required": ["action"], "enums": {"action": ["list", "get", "recover"]}},
+        "live_exec": {"properties": ["code", "expected_set_signature", "allow_legacy_note_api"], "required": ["code"]},
+        "live_clip_add_notes": {"properties": ["notes", "replace_existing_clip", "clear_range"], "required": ["ref", "notes"]},
     }
     checks = []
-    for name, expected in expectations.items():
+    for name in sorted(set(tools) | set(expectations)):
+        expected = expectations.get(name, {})
         schema = tools.get(name) or {}
         properties = schema.get("properties") or {}
         missing_properties = [item for item in expected.get("properties", []) if item not in properties]
@@ -223,10 +242,14 @@ def mcp_tool_schema_status() -> dict:
             actual_enum = properties.get(prop, {}).get("enum")
             if actual_enum != expected_enum:
                 enum_mismatches[prop] = {"expected": expected_enum, "actual": actual_enum}
-        ok = not missing_properties and not missing_required and not enum_mismatches
+        object_schema = schema.get("type") == "object"
+        discoverable = isinstance(schema.get("properties"), dict)
+        ok = object_schema and discoverable and not missing_properties and not missing_required and not enum_mismatches
         checks.append({
             "tool": name,
             "ok": ok,
+            "object_schema": object_schema,
+            "discoverable": discoverable,
             "missing_properties": missing_properties,
             "missing_required": missing_required,
             "enum_mismatches": enum_mismatches,

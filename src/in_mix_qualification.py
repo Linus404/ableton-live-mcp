@@ -8,8 +8,9 @@ from pathlib import Path
 from contextlib import ExitStack
 
 from ableton_paths import state_dir
+from install_remote_script import remote_script_root
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = remote_script_root()
 REQUIRED_CHECKS = {"post_mixer_gain", "pan", "mute", "shared_clock", "programme_path", "latency"}
 
 
@@ -23,12 +24,12 @@ def _hash(path):
 
 def code_hashes():
     return {name: _hash(path) for name, path in {
-        "capture": ROOT / "src" / "in_mix_capture.py",
+        "capture": Path(__file__).with_name("in_mix_capture.py"),
         "remote_script": ROOT / "Ableton_Live_MCP" / "bridge.py",
-        "calibration": ROOT / "src" / "in_mix_calibration.py",
+        "calibration": Path(__file__).with_name("in_mix_calibration.py"),
         "qualification": Path(__file__),
-        "live_settings": ROOT / "src" / "live_settings.py",
-        "assessment": ROOT / "src" / "audio_assessment.py",
+        "live_settings": Path(__file__).with_name("live_settings.py"),
+        "assessment": Path(__file__).with_name("audio_assessment.py"),
     }.items()}
 
 

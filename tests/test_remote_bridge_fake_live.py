@@ -449,6 +449,163 @@ def make_bridge(monkeypatch):
     return bridge, song, app
 
 
+def test_dispatch_timeout_distinguishes_unstarted_and_running_work(monkeypatch):
+    bridge, _, _ = make_bridge(monkeypatch)
+    bridge._main_thread_id = -1
+    callbacks = []
+    bridge.schedule_message = lambda delay, callback: callbacks.append(callback)
+    executed = []
+    bridge._rpc_marker = lambda params: executed.append(True)
+    request = {"jsonrpc": "2.0", "id": 7, "method": "marker", "params": {"timeout": 0.001, "strict_timeout": True}}
+    response = bridge._dispatch(request)
+    assert response["id"] == 7
+    assert response["error"]["data"]["outcome"] == "failed"
+    callbacks[0]()
+    assert executed == []
+
+    started = threading.Event()
+    finish = threading.Event()
+    workers = []
+
+    def work(params):
+        started.set()
+        finish.wait(3)
+
+    def schedule(delay, callback):
+        worker = threading.Thread(target=callback)
+        workers.append(worker)
+        worker.start()
+        assert started.wait(1)
+
+    bridge._rpc_marker = work
+    bridge.schedule_message = schedule
+    request["params"]["force_main_thread_probe"] = True
+    try:
+        response = bridge._dispatch(request)
+        assert response["error"]["data"]["outcome"] == "uncertain"
+        assert bridge._rpc_bridge_status({})["main_thread"]["outcome"] == "uncertain"
+    finally:
+        finish.set()
+        for worker in workers:
+            worker.join(3)
+    assert bridge._rpc_bridge_status({})["main_thread"]["outcome"] == "idle"
+
+
+def test_remote_reader_refuses_unterminated_request(monkeypatch):
+    bridge, _, _ = make_bridge(monkeypatch)
+
+    class TruncatedSocket:
+        chunks = [b'{"id":1,"method":"call"}', b""]
+
+        def recv(self, size):
+            return self.chunks.pop(0)
+
+    with pytest.raises(ValueError, match="complete request"):
+        bridge._read_line(TruncatedSocket(), b"")
+
+
+def test_batch_retains_successful_prefix_and_uncertain_side_effect(monkeypatch):
+    bridge, _, _ = make_bridge(monkeypatch)
+    applied = []
+    bridge._rpc_first = lambda params: applied.append("first")
+
+    def partial(params):
+        applied.append("partial")
+        raise ValueError("failure after mutation")
+
+    bridge._rpc_partial = partial
+    request = {"id": 1, "method": "batch", "params": {"operations": [
+        {"method": "first"}, {"method": "partial"}, {"method": "first"},
+    ]}}
+    response = bridge._dispatch(request)
+    assert applied == ["first", "partial"]
+    assert response["outcome"] == "uncertain"
+    assert [item["outcome"] for item in response["result"]] == ["success", "uncertain"]
+    assert response["result"][1]["index"] == 1
+    result = bridge._rpc_batch({"operations": [{"method": "does_not_exist"}]})
+    assert result[0]["outcome"] == "failed"
+
+
+def test_dispatch_exception_does_not_claim_side_effects_rolled_back(monkeypatch):
+    bridge, _, _ = make_bridge(monkeypatch)
+    applied = []
+
+    def partial(params):
+        applied.append(True)
+        raise RuntimeError("failed after editing")
+
+    bridge._rpc_partial = partial
+    response = bridge._dispatch({"id": 1, "method": "partial", "params": {}})
+    assert applied == [True]
+    assert response["error"]["data"]["outcome"] == "uncertain"
+
+
+def test_nested_batch_failure_propagates_and_preserves_applied_prefix(monkeypatch):
+    bridge, _, _ = make_bridge(monkeypatch)
+    applied = []
+    bridge._rpc_marker = lambda params: applied.append("marker")
+
+    def partial(params):
+        applied.append("partial")
+        raise RuntimeError("after edit")
+
+    bridge._rpc_partial = partial
+    response = bridge._dispatch({"id": 1, "method": "batch", "params": {"operations": [
+        {"method": "marker"},
+        {"method": "batch", "params": {"operations": [
+            {"method": "marker"}, {"method": "partial"}, {"method": "marker"},
+        ]}},
+        {"method": "marker"},
+    ]}})
+    assert applied == ["marker", "marker", "partial"]
+    assert response["outcome"] == "uncertain"
+    assert [item["outcome"] for item in response["result"]] == ["success", "uncertain"]
+    nested = response["result"][1]
+    assert nested["ok"] is False
+    assert [item["outcome"] for item in nested["result"]] == ["success", "uncertain"]
+    assert nested["result"][1]["index"] == 1
+
+
+def test_batch_checks_each_child_signature_before_execution(monkeypatch):
+    bridge, _, _ = make_bridge(monkeypatch)
+    applied = []
+    bridge._rpc_marker = lambda params: applied.append(True)
+    result = bridge._rpc_batch({"operations": [
+        {"method": "marker", "params": {"expected_set_signature": "stale"}},
+    ]})
+    assert applied == []
+    assert result[0]["outcome"] == "failed"
+    assert "Set changed" in result[0]["error"]
+
+    expected = bridge._set_signature()
+
+    def change(params):
+        applied.append(True)
+        bridge.song().tempo += 1
+
+    bridge._rpc_change = change
+    result = bridge._rpc_batch({"expected_set_signature": expected, "operations": [
+        {"method": "change"}, {"method": "marker"},
+    ]})
+    assert applied == [True]
+    assert [item["outcome"] for item in result] == ["success", "failed"]
+    assert result[1]["index"] == 1
+
+
+def test_batch_m4l_delivery_remains_pending_without_host_ack(monkeypatch):
+    bridge, _, _ = make_bridge(monkeypatch)
+    bridge._rpc_agent_m4l_device = lambda params: {"command_file_written": True, "sent": False, "command_id": "delivered"}
+    response = bridge._dispatch({"id": 1, "method": "batch", "params": {"operations": [
+        {"method": "batch", "params": {"operations": [{"method": "agent_m4l_device"}]}},
+    ]}})
+    assert response["outcome"] == "pending"
+    parent = response["result"][0]
+    assert parent["ok"] is True
+    assert parent["outcome"] == "pending"
+    assert parent["result"][0]["outcome"] == "pending"
+    assert parent["result"][0]["result"]["command_id"] == "delivered"
+
+
 def test_resolve_get_children_and_call(monkeypatch):
     bridge, song, _app = make_bridge(monkeypatch)
     assert bridge._resolve_path("live_set tracks 1").name == "Track 2"
@@ -833,7 +990,7 @@ def test_isolated_audio_tap_browser_load_verifies_actual_position(monkeypatch):
     track = song.master_track
     track.devices.append(FakeDevice())
     app.browser.user_library._children.append(FakeBrowserItem("AgentAudioTap_take", loadable=True, device=True))
-    monkeypatch.setattr(track, "insert_device", lambda *_args: (_ for _ in ()).throw(RuntimeError("insert unavailable")))
+    monkeypatch.delattr(type(track), "insert_device")
 
     def load(_item):
         tap = FakeDevice()
@@ -868,7 +1025,7 @@ def test_isolated_audio_tap_browser_load_without_visible_device_fails(monkeypatc
     bridge, song, app = make_bridge(monkeypatch)
     track = song.master_track
     app.browser.user_library._children.append(FakeBrowserItem("AgentAudioTap_take", loadable=True, device=True))
-    monkeypatch.setattr(track, "insert_device", lambda *_args: (_ for _ in ()).throw(RuntimeError("insert unavailable")))
+    monkeypatch.delattr(type(track), "insert_device")
     result = bridge._rpc_agent_audio_tap_setup({"isolated": True, "device_name": "AgentAudioTap_take"})
     assert not result["ok"] and not result["end_verified"] and result["tap_ref"] is None
     assert result["owned_devices"] == []
@@ -1384,6 +1541,70 @@ def test_agent_m4l_device_falls_back_to_track_insert_device_when_browser_is_stal
     assert result["loaded"] is True
     assert app.browser.loaded == []
     assert song.tracks[1].devices[-1].name == "AgentM4L_audio_effect_Fresh"
+
+
+@pytest.mark.parametrize("prefer_browser_load", [False, True])
+def test_m4l_partial_insert_error_never_falls_back_or_retries(monkeypatch, tmp_path, prefer_browser_load):
+    bridge, song, app = make_bridge(monkeypatch)
+    track = song.tracks[1]
+    insert = track.insert_device
+    calls = []
+
+    def partial_insert(*args):
+        calls.append(args)
+        insert(*args)
+        raise RuntimeError("after insertion")
+
+    monkeypatch.setattr(track, "insert_device", partial_insert)
+    if prefer_browser_load:
+        bridge._find_browser_item_named = lambda name: None
+    result = bridge._rpc_agent_m4l_device({
+        "device_name": "AgentM4L_audio_effect_Wobble",
+        "target_track": {"path": "live_set tracks 1"},
+        "prefer_browser_load": prefer_browser_load, "udp": False,
+        "command_file": str(tmp_path / "command.json"),
+        "status_file": str(tmp_path / "status.json"),
+    })
+    assert len(calls) == 1
+    assert len(track.devices) == 1
+    assert app.browser.loaded == []
+    assert result["load_outcome"] == "uncertain"
+    assert result["load_retryable"] is False
+
+
+def test_m4l_post_insert_inspection_failure_never_uses_browser(monkeypatch):
+    bridge, song, app = make_bridge(monkeypatch)
+    track = song.tracks[1]
+    bridge._rename_new_track_device = lambda *args: (_ for _ in ()).throw(RuntimeError("inspection failed"))
+    with pytest.raises(RuntimeError, match="uncertain execution"):
+        bridge._load_agent_m4l_device(track, "AgentM4L_audio_effect_Wobble", "audio_effect", {})
+    assert len(track.devices) == 1
+    assert app.browser.loaded == []
+
+
+def test_m4l_browser_partial_load_never_uses_insertion_fallback(monkeypatch):
+    bridge, song, app = make_bridge(monkeypatch)
+    track = song.tracks[1]
+    calls = []
+
+    def load(item):
+        calls.append(item)
+        track.insert_device("AgentM4L_audio_effect_Wobble")
+        raise RuntimeError("after browser load")
+
+    app.browser.load_item = load
+    with pytest.raises(RuntimeError, match="uncertain execution"):
+        bridge._load_agent_m4l_device(track, "AgentM4L_audio_effect_Wobble", "audio_effect", {"prefer_browser_load": True})
+    assert len(calls) == len(track.devices) == 1
+
+
+def test_m4l_only_proven_pre_edit_browser_miss_is_retryable(monkeypatch):
+    bridge, _, _ = make_bridge(monkeypatch)
+    bridge._find_browser_item_named = lambda name: None
+    with pytest.raises(RuntimeError) as error:
+        bridge._load_agent_m4l_device(types.SimpleNamespace(devices=[]), "not indexed", "audio_effect", {})
+    assert error.value.outcome == "failed"
+    assert error.value.load_retryable is True
 
 
 def test_agent_m4l_device_prefers_track_insert_device_before_browser_load(monkeypatch):

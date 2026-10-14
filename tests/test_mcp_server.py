@@ -152,7 +152,7 @@ def test_serve_survives_malformed_stdin_line():
     server = make_server(FakeBridge())
     stdin = io.StringIO('this is not json {{{\n{"jsonrpc": "2.0", "id": 1, "method": "tools/list"}\n')
     stdout = io.StringIO()
-    server.serve(stdin, stdout)
+    server.serve(stdin, stdout, strict_lifecycle=False)
     responses = [json.loads(line) for line in stdout.getvalue().splitlines()]
     assert responses[0]["id"] is None
     assert responses[0]["error"]["code"] == -32700
@@ -165,6 +165,8 @@ def test_main_stdio_is_utf8_with_lf_framing():
     # Drive the real entry point over pipes: a UTF-8 tool name must round-trip
     # into the error message, and response lines must end in bare \n.
     request = (
+        '{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}\n'
+        '{"jsonrpc":"2.0","method":"notifications/initialized"}\n'
         '{"jsonrpc": "2.0", "id": 1, "method": "tools/call",'
         ' "params": {"name": "spår_åäö", "arguments": {}}}\n'
     )
@@ -178,7 +180,7 @@ def test_main_stdio_is_utf8_with_lf_framing():
     )
     assert proc.stdout, proc.stderr.decode("utf-8", "replace")
     assert b"\r\n" not in proc.stdout
-    response = json.loads(proc.stdout.decode("utf-8"))
+    response = json.loads(proc.stdout.decode("utf-8").splitlines()[-1])
     assert response["error"]["message"] == "Unknown tool: spår_åäö"
 
 
@@ -198,12 +200,12 @@ def test_initialize_includes_general_model_instructions():
     assert "find_similar_sounds requires Live 12+" in instructions
     assert "start with path" in instructions
     assert "unique ids" in instructions
-    assert "Idle sockets auto-retry" in instructions
+    assert "Idle sockets reconnect before send" in instructions
     assert "Validate runtime_current" in instructions
     assert "live_mutations_safe" in instructions
-    assert "no-arg tool schema=stale MCP" in instructions
+    assert "parameterized tools must advertise their arguments" in instructions
     assert "No parallel Live API" in instructions
-    assert "sent-call timeouts fail closed" in instructions
+    assert "sent-call failures fail closed" in instructions
     assert "client/RS cooldown" in instructions
     assert "live_bridge_status" in instructions
     assert "Save/recover modals" in instructions
@@ -241,7 +243,7 @@ def test_initialize_includes_general_model_instructions():
     assert "audio-reactive web: prove signal+visual delta" in instructions
     assert "Smooth clicks" in instructions
     assert "full Live object model remains available" in instructions
-    assert len(instructions) < 1600
+    assert len(instructions) < 1750
 
 
 def test_validate_reports_local_mcp_tool_schemas():
@@ -1109,6 +1111,8 @@ def test_agent_m4l_device_tool_retries_fresh_build_load(monkeypatch, tmp_path):
                     "method": method,
                     "loaded": False,
                     "load_error": "Device AgentM4L_instrument_Orbit_Glass_Synth not found.",
+                    "load_outcome": "failed",
+                    "load_retryable": True,
                     "command_id": "load1",
                     "status_file": params["status_file"],
                 }
@@ -2528,7 +2532,19 @@ def test_tool_list_stays_compact():
     server = make_server(FakeBridge())
     response = server.handle({"jsonrpc": "2.0", "id": 7, "method": "tools/list"})
     payload = json.dumps(response, separators=(",", ":"))
-    assert len(payload) < 46000  # Includes all eight bounded audio-understanding feature schemas.
+    workflow_names = {"live_workflow", "live_snapshot", "live_snapshot_diff", "live_workflow_history"}
+    legacy = {**response, "result": {"tools": [t for t in response["result"]["tools"] if t["name"] not in workflow_names]}}
+    legacy_bytes = len(json.dumps(legacy, separators=(",", ":")))
+    assert legacy_bytes < 65000  # Preserve the original 51-tool discovery budget.
+    phase3 = json.loads(payload)
+    workflow = next(t for t in phase3["result"]["tools"] if t["name"] == "live_workflow")
+    variants = workflow["inputSchema"]["properties"]["operations"]["items"]["oneOf"]
+    variants[:] = [v for v in variants if v["properties"]["op"]["const"] != "clip.notes.transform"]
+    phase3_bytes = len(json.dumps(phase3, separators=(",", ":")))
+    assert phase3_bytes - legacy_bytes < 16000  # Retain the signed-off four-tool budget.
+    assert phase3_bytes < 80000
+    assert len(payload) - phase3_bytes < 1400  # One fully typed transform variant: measured 1305 bytes.
+    assert len(payload) < 81400
     live_eval = next(tool for tool in response["result"]["tools"] if tool["name"] == "live_eval")
     assert "live_exec" in live_eval["description"]
     assert "duplicate session clips" not in live_eval["description"].lower()
@@ -3070,7 +3086,7 @@ def test_bridge_client_reconnects_before_remote_idle_timeout(monkeypatch):
     assert created[0].closed is True
 
 
-def test_bridge_client_discards_stale_idle_timeout_response(monkeypatch):
+def test_bridge_client_rejects_stale_idle_timeout_without_replay(monkeypatch):
     created = []
 
     class FakeSocket:
@@ -3105,8 +3121,10 @@ def test_bridge_client_discards_stale_idle_timeout_response(monkeypatch):
     monkeypatch.setattr("socket.create_connection", connect)
     client = AbletonBridgeClient(BridgeConfig(timeout=10.0, idle_timeout=0.0))
 
-    assert client.request("ping") == {"ok": True}
-    assert len(created) == 2
+    with pytest.raises(AbletonBridgeError) as failure:
+        client.request("ping")
+    assert failure.value.outcome == "uncertain"
+    assert len(created) == 1
     assert created[0].closed is True
 
 
@@ -3630,7 +3648,8 @@ def test_remote_script_resources_available_from_source_checkout():
 
 def test_debug_commands_are_not_published_console_scripts():
     pyproject = (Path(__file__).resolve().parents[1] / "pyproject.toml").read_text()
-    assert 'version = "0.1.1"' in pyproject
+    assert 'dynamic = ["version"]' in pyproject
+    assert '[tool.hatch.version]' in pyproject and 'path = "src/server.py"' in pyproject
     assert 'ableton-live-mcp = "server:main"' in pyproject
     assert 'ableton-live-mcp-validate = "validate:main"' in pyproject
     assert 'ableton-live-mcp-install-remote-script = "install_remote_script:main"' in pyproject

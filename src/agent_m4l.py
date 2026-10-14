@@ -10,8 +10,9 @@ from pathlib import Path
 from typing import Any
 
 from ableton_paths import default_user_library, find_max_device_template, state_dir
+from install_remote_script import remote_script_root
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = remote_script_root()
 HOST_JS = ROOT / "m4l" / "agent_m4l_host.js"
 GENERATED_DIR = ROOT / "m4l" / "generated"
 WEBUI_DIR = GENERATED_DIR / "webui"

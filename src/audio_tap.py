@@ -11,9 +11,8 @@ import uuid
 from pathlib import Path
 
 from ableton_paths import default_user_library, state_dir
-from agent_m4l import build_amxd as build_role_amxd
+from agent_m4l import ROOT, build_amxd as build_role_amxd
 
-ROOT = Path(__file__).resolve().parents[1]
 RUNTIME_VERSION = "audio-tap-2"
 
 

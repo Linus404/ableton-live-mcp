@@ -38,5 +38,5 @@ def test_masking_contract_failures_are_mcp_errors_without_live():
         "name": "live_audio_masking", "arguments": {**ARGUMENTS,
             "alignment": {**ARGUMENTS["alignment"], "verified": False}},
     }})
-    assert response["error"]["code"] == -32000
+    assert response["error"]["code"] == -32602
     assert "alignment" in response["error"]["message"]

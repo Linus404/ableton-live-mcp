@@ -48,6 +48,8 @@ After changing files under `Ableton_Live_MCP/`, reinstall the Remote Script and 
 
 Reloading the Control Surface or restarting Live can interrupt playback and the user's current set. Ask for explicit user authorization before doing either, then rerun `ableton-live-mcp-validate` and require `runtime_current: true` and `live_mutations_safe: true` before claiming current-runtime e2e validation or sending generated-device mutations.
 
+Switching a Control Surface to None and back can retain Live's imported Python module cache. If installed files are current but the loaded-code fingerprint still mismatches after that action, stop and request a separately authorized genuine Live restart with the user preserving their work first. Do not force-reload Python modules inside an active surface: mixed old-instance/new-module code can produce misleading freshness evidence.
+
 If a known MCP tool appears in the active client with an obviously stale or no-argument schema, such as `live_agent_audio_tap` rejecting `{"command": "stop"}` or `live_transport` rejecting `{"action": "play"}`, stop using that client schema. Run `ableton-live-mcp-validate` and reload/restart the MCP server or MCP client session so `tools/list` is refreshed; do not keep trying calls that the active schema cannot represent.
 
 Save, crash-report, and "Recover last Live Set" dialogs are common after forced recovery. Treat any Live modal as a hard blocker for MCP mutations: inspect the Ableton Live UI, resolve only the Ableton dialog, then rerun validation before continuing. If the user has authorized a fresh disposable validation set and the open set contains only generated test material, choose the non-saving/non-recovery path such as "Don't Save" or "No"; if user work might be present, stop and ask before dismissing it.
@@ -72,13 +74,36 @@ Never push commits, branches, or tags to a remote without explicit user authoriz
 
 On Windows/PowerShell, do not use Bash heredocs such as `python - <<'PY'`; PowerShell treats `<` as redirection. For multiline Python, use a single-quoted here-string piped into Python: `@' ... '@ | python -`. Prefer this form for Live bridge scripts or nested JSON/code strings instead of fragile `python -c` quoting.
 
+## Everyday workflow identity and recovery
+
+Use `live_workflow` plan/apply for bounded common edits, and `live_snapshot`,
+`live_snapshot_diff`, `live_workflow_history` for declared metadata coverage and
+explicit conditional compensation. See `WORKFLOWS.md` for exact arguments and
+limits. Plan is read-only, not a reservation. Apply retains failed/uncertain
+children, applied prefixes and skipped suffixes; never replay an uncertain edit.
+
+Set content signatures are stale-inspection guards, not stable set identity or
+complete hashes of notes, mixer/routing, automation and device state. Snapshot/
+recovery context needs supported valid retained set anchors and bridge lifetime;
+pinned targets also require current membership and original-object validity.
+Reordered paths or recycled native pointer IDs must not select replacement objects.
+
+Undo groups are not transactions; partial changes and group-closure errors remain
+explicit. `live_undo` steps refer to shared Live history, not mutation counts.
+Conditional recovery requires complete acknowledged before/after evidence and
+checks every touched current value against recorded after-value before restoring.
+Create/delete, notes, imports/duplication, launch/stop and uncertain writes are not
+compensated from metadata. Recovery is itself an edit with retained prefix and
+uncertainty; failed/uncertain attempts are not silently retried. History/snapshots
+are bounded process-local records, lost on eviction/server restart.
+
 ## Bridge reliability
 
-Persistent localhost bridge sockets can be closed after an idle period. The client should proactively reconnect with `ABLETON_MCP_IDLE_TIMEOUT` and retry stale `id: null` `"timed out"` responses from older Remote Scripts. The Remote Script should close idle clients silently, without sending JSON-RPC timeout errors that can be misread as the next request's response. Use per-call `timeout` only for work that genuinely needs longer on Live's main thread.
+Persistent localhost bridge sockets can be closed after an idle period. The client should proactively reconnect with `ABLETON_MCP_IDLE_TIMEOUT` before sending the next request. A stale `id: null` `"timed out"` response from an older Remote Script cannot establish whether a newly sent edit ran: close the connection and report an uncertain outcome rather than replaying it. The Remote Script should close idle clients silently, without sending JSON-RPC timeout errors that can be misread as the next request's response. Use per-call `timeout` only for work that genuinely needs longer on Live's main thread.
 
 Keep TCP connection failure bounded separately from Live work. `ABLETON_MCP_CONNECT_TIMEOUT` controls the short localhost connect attempt, while `ABLETON_MCP_TIMEOUT` and per-call `timeout` control how long to wait for operations that are already connected and running inside Live.
 
-After a request has been written to the bridge socket, response timeouts must fail closed rather than retrying automatically. Treat the mutation status as unknown until a later compact status/summary check proves whether Live applied it; blind retry can duplicate clips, devices, transport actions, or generated M4L commands. The Python client may enter a short stall cooldown after a sent-call timeout or Live-main-thread timeout; ordinary Live API calls should fail fast during that window while `live_bridge_status` remains available for diagnosis.
+After any socket send attempt, partial sends, connection loss, response timeouts, malformed responses and mismatched request IDs must fail closed rather than retrying automatically. Treat an uncertain mutation outcome as unknown until a later compact status/summary check proves whether Live applied it; blind retry can duplicate clips, devices, transport actions, or generated M4L commands. Retain structured outcome and request diagnostics instead of reducing these failures to a bare error string. The Python client may enter a short stall cooldown after a sent-call timeout or Live-main-thread timeout; ordinary Live API calls should fail fast during that window while `live_bridge_status` remains available for diagnosis.
 
 When using `strict_timeout: true` for a deliberate latency probe, the Python client response deadline should honor that shorter timeout too. Non-strict calls may keep the longer default because stressed Live sets often respond late but correctly.
 
@@ -510,7 +535,7 @@ Keep stable `webui.id` values across hot reloads when the design is an evolution
 
 For web-only UI/source changes, prefer `command: "web_reload"` with the target `webui`/`webuis` id and path after updating the web assets. `web_reload` rereads existing jweb/jbrowser panels without clearing dynamic audio/MIDI objects, so it is the preferred low-latency path for creative Three.js/canvas iteration during playback. It must never replace the recovery sidecar with a web-only patch; the sidecar needs to remain a full reconstructable device spec. Use full `update` only when the Max object graph, UI geometry, bindings, or DSP/MIDI topology actually changed, and then validate post-reload audio/MIDI meters before claiming uninterrupted playback.
 
-If a freshly built generated AMXD reports a `load_error` such as "Device ... not found" but the build and install paths succeeded, treat it as a Live browser indexing delay before treating it as a generation failure. Retry with a longer `load_retry_timeout`, or use `live_browser_search` in `user_library` followed by `live_browser_load` once the item appears.
+If a freshly built generated AMXD reports a `load_error` such as "Device ... not found" but the build and install paths succeeded, it may be a Live browser indexing delay. Automatic load retry requires explicit `load_outcome: "failed"` and `load_retryable: true` evidence of a pre-edit indexing miss; a load exception after insertion/browser loading was attempted is uncertain and must not trigger fallback or replay. For a proven indexing miss, retry with a longer `load_retry_timeout`, or use `live_browser_search` in `user_library` followed by `live_browser_load` once the item appears. Inspect the current device chain before acting on an uncertain load result.
 
 Use the host's `web_read_scheduled`, `web_read_attempts`, `web_read_pending`, `web_loaded`, `web_url`, `web_title`, and per-panel `web_<id>_loaded`, `web_<id>_read_attempts`, `web_<id>_url`, and `web_<id>_title` status state to distinguish host delivery, browser load, and custom JavaScript readiness. The host tags browser messages and retries reads under load; if attempts exhaust after selecting the device and showing Detail/Device Chain, the embedded browser itself did not finish loading, so inspect the Max/CEF logs and active renderer process count before debugging the generated HTML.
 

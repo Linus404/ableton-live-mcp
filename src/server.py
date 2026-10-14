@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import argparse
+import importlib.metadata
 import hashlib
 import socket
 import sys
@@ -16,6 +18,22 @@ from visual_capture import capture_ableton_window, capture_max_console_window
 
 
 __version__ = "0.1.1"
+
+_IDENTITY_MODULES = (Path(__file__).resolve(), Path(sys.modules[StdioMcpServer.__module__].__file__).resolve(),
+                     Path(__file__).resolve().with_name("mcp_http.py"),
+                     Path(sys.modules[AbletonBridgeClient.__module__].__file__).resolve())
+_SOURCE_FINGERPRINT = hashlib.sha256(b"".join(p.name.encode() + p.read_bytes() for p in _IDENTITY_MODULES)).hexdigest()
+
+
+def installation_identity() -> dict[str, Any]:
+    try:
+        distribution = importlib.metadata.distribution("ableton-live-mcp")
+        installed = {"version": distribution.version, "location": str(distribution.locate_file("").resolve())}
+    except importlib.metadata.PackageNotFoundError:
+        installed = None
+    return {"name": "ableton-live-mcp", "version": __version__,
+            "executable": str(Path(sys.executable).resolve()), "modules": [str(p) for p in _IDENTITY_MODULES],
+            "distribution": installed, "sourceFingerprint": _SOURCE_FINGERPRINT}
 
 
 ABLETON_AGENT_GUIDE = "General Live object-model bridge; examples are heuristics, not limits."
@@ -40,7 +58,7 @@ ABLETON_MCP_INSTRUCTIONS = (
     "Compact. "
     "find_similar_sounds requires Live 12+. "
     "Tap: start with path; unique ids; isolate. "
-    "Validate runtime_current/live_mutations_safe; no-arg tool schema=stale MCP, reload. No parallel Live API. Idle sockets auto-retry; sent-call timeouts fail closed; client/RS cooldown; live_bridge_status. Save/recover modals: inspect UI, no retry mutations. "
+    "Validate runtime_current/live_mutations_safe; parameterized tools must advertise their arguments; missing properties indicate stale discovery, reload MCP. No parallel Live API. Idle sockets reconnect before send; sent-call failures fail closed; client/RS cooldown; live_bridge_status. Save/recover modals: inspect UI, no retry mutations. "
     "Agent must visually verify M4L device UI: inspect pixels; status/meter not enough; Ableton-window-only, no arbitrary apps/windows, select target then device-detail crop, blank_capture invalid; locked/asleep display blocks capture/e2e. "
     "M4L: freeform UI; wait_status/compact_result+cmd. host_runtime_version. No default piano/knob UI/templates. web_reload UI-only/no recovery overwrite, throttled fallback wakes, load:false/set/status skip build, direct status polls, host_not_woken=no ack, midiin+midiparse, origin rect/openrect, bounds, ui_bindings/no loops, agent-settable UI, telemetry report:false, ack guard/state throttles, webkbd DOM->message/no OS keys, web assets/source_path, status_state_keys/_only diag, audio buses, jweb/jbrowser aliases. Sizing: device_width/openrect tight to authored UI/webview; keep hidden patching_rect inside width; shrink via new host/fresh reload + nonblank capture. FFT/spectrum=real telemetry/no fake; audio-reactive web: prove signal+visual delta. Smooth clicks. DSP: tap A/B refs; path->out; bands/crest/pitch. Hang: unload web/restart/validate. "
     "full Live object model remains available."
@@ -60,6 +78,9 @@ AGENT_AUDIO_TAP_SCHEMA = {
         "path": {"type": "string"},
         "id": {"type": "string"},
         "udp": {"type": "boolean"},
+        "command_id": {"type": "string"},
+        "command_file": {"type": "string"},
+        "port": {"type": "integer", "minimum": 1, "maximum": 65535},
     },
     "required": ["command"],
 }
@@ -78,10 +99,30 @@ def loose_schema() -> dict[str, Any]:
 
 def make_server(client: AbletonBridgeClient | None = None) -> StdioMcpServer:
     bridge = client or AbletonBridgeClient(BridgeConfig.from_env())
-    server = StdioMcpServer("ableton-live-mcp", __version__, ABLETON_MCP_INSTRUCTIONS)
+    server = StdioMcpServer("ableton-live-mcp", __version__, ABLETON_MCP_INSTRUCTIONS,
+                            initialize_meta={"ableton-live-mcp/identity": installation_identity()})
 
     def forward(method: str):
         return lambda args: bridge.request(method, args)
+
+    from workflows import WORKFLOW_SCHEMA, run_workflow
+    from workflow_history import WorkflowHistory, tool_specs
+    workflow_history = WorkflowHistory()
+
+    def live_workflow(args):
+        params = dict(args)
+        if params.get("snapshot_id"):
+            pinned = workflow_history.snapshot_context(params["snapshot_id"])
+            if params.get("context") and params["context"] != pinned:
+                raise ValueError("Explicit context differs from snapshot context")
+            params["context"] = pinned
+        result = run_workflow(bridge, params)
+        result["label"] = params.get("label")
+        return workflow_history.record(result) if params["mode"] == "apply" else result
+
+    server.add_tool(Tool("live_workflow", "Plan/apply bounded typed everyday operations in one callback; preflight, pinned targets, honest undo boundaries and retained outcomes.", WORKFLOW_SCHEMA, live_workflow))
+    for spec in tool_specs(bridge, workflow_history):
+        server.add_tool(Tool(spec["name"], spec["description"], spec["inputSchema"], spec["handler"]))
 
     ref = {
         "type": "object",
@@ -90,6 +131,7 @@ def make_server(client: AbletonBridgeClient | None = None) -> StdioMcpServer:
             "id": {"type": "integer"},
         },
         "additionalProperties": False,
+        "anyOf": [{"required": ["path"]}, {"required": ["id"]}],
     }
 
     timeout_control = {"timeout": {"type": "number"}}
@@ -97,11 +139,8 @@ def make_server(client: AbletonBridgeClient | None = None) -> StdioMcpServer:
     server.add_tool(Tool("live_bridge_status", "Socket-thread status; no Live API/main-thread scheduling.", schema(timeout_control), forward("bridge_status")))
 
     def live_undo(args):
-        # Safety net for agent mutations: roll back (or forward) N steps of Live's
-        # undo history. Checkpoint pattern: count your own mutations, then undo
-        # that many steps and verify with live_set_summary — user edits made in
-        # the Live GUI interleave into the same history, so step counts are a
-        # contract with the user, not a guarantee.
+        # Steps address shared Live history, not mutation counts; grouped edits
+        # and GUI changes affect that history. Inspect the intended state after.
         params = dict(args or {})
         steps = int(params.get("steps") or 1)
         if steps < 1:
@@ -110,21 +149,28 @@ def make_server(client: AbletonBridgeClient | None = None) -> StdioMcpServer:
         can_expr = "song.can_redo" if redo else "song.can_undo"
         act_code = "song.redo()\nresult = True" if redo else "song.undo()\nresult = True"
         performed = 0
-        for _ in range(steps):
-            if not bridge.request("eval", {"expr": can_expr}):
-                break
-            bridge.request("exec", {"code": act_code})
-            performed += 1
+        try:
+            for _ in range(steps):
+                if not bridge.request("eval", {"expr": can_expr}):
+                    break
+                bridge.request("exec", {"code": act_code})
+                performed += 1
+            can_undo = bool(bridge.request("eval", {"expr": "song.can_undo"}))
+            can_redo = bool(bridge.request("eval", {"expr": "song.can_redo"}))
+        except Exception as exc:
+            diagnostic = exc.to_dict() if callable(getattr(exc, "to_dict", None)) else {"message": str(exc), "outcome": "uncertain"}
+            return {"ok": False, "action": "redo" if redo else "undo", "requested": steps,
+                    "performed": performed, "outcome": "uncertain" if diagnostic.get("outcome") == "uncertain" else ("partial" if performed else "failed"), "error": diagnostic}
         return {
             "action": "redo" if redo else "undo",
             "requested": steps,
             "performed": performed,
             "exhausted": performed < steps,
-            "can_undo": bool(bridge.request("eval", {"expr": "song.can_undo"})),
-            "can_redo": bool(bridge.request("eval", {"expr": "song.can_redo"})),
+            "can_undo": can_undo,
+            "can_redo": can_redo,
         }
 
-    server.add_tool(Tool("live_undo", "Undo/redo N history steps (mutation safety net). Count your own mutations, roll back that many, verify with live_set_summary; GUI edits interleave. Returns performed/exhausted/can_undo/can_redo.", schema({
+    server.add_tool(Tool("live_undo", "Undo/redo N shared Live history steps, not mutation counts. GUI edits interleave; verify intended state. Returns performed/exhausted/can_undo/can_redo.", schema({
         "steps": {"type": "integer", "minimum": 1, "description": "History steps to move (default 1)."},
         "redo": {"type": "boolean", "description": "Move forward (redo) instead of back."},
     }), live_undo))
@@ -307,12 +353,30 @@ def make_server(client: AbletonBridgeClient | None = None) -> StdioMcpServer:
         **mutation_controls,
     }, ["ref", "device_name"]), forward("track_insert_device")))
     server.add_tool(Tool("live_agent_audio_tap", AGENT_AUDIO_TAP_DESCRIPTION, AGENT_AUDIO_TAP_SCHEMA, forward("agent_audio_tap")))
-    server.add_tool(Tool("live_agent_audio_tap_setup", AGENT_AUDIO_TAP_SETUP_DESCRIPTION, loose_schema(), forward("agent_audio_tap_setup")))
+    server.add_tool(Tool("live_agent_audio_tap_setup", AGENT_AUDIO_TAP_SETUP_DESCRIPTION, schema({
+        "placement": {"type": "string", "description": "master (default), or track with target_track."},
+        "target_track": ref, "solo_track": ref,
+        "exclusive_solo": {"type": "boolean"}, "remove_existing": {"type": "boolean"},
+        "isolated": {"type": "boolean"}, "device_name": {"type": "string"},
+        "stop": {"type": "boolean"}, "reset_time": {"type": "number"},
+        **mutation_controls,
+    }), forward("agent_audio_tap_setup")))
     def live_audio_capture(args):
         from audio_capture import capture_audio
         return capture_audio(bridge, args)
 
-    server.add_tool(Tool("live_audio_capture", "Capture; see AGENTS.md.", loose_schema(), live_audio_capture))
+    capture_properties = {
+        "start_beat": {"type": "number", "minimum": 0},
+        "length_beats": {"type": "number", "exclusiveMinimum": 0},
+        "track_refs": {"type": "array", "items": ref},
+        "include_returns": {"type": "boolean"}, "include_master": {"type": "boolean"},
+        "pre_roll_beats": {"type": "number", "minimum": 0}, "post_roll_beats": {"type": "number", "minimum": 0},
+        "max_duration_seconds": {"type": "number", "exclusiveMinimum": 0, "maximum": 600},
+        "output_directory": {"type": "string"},
+        "precision": {"type": "string", "enum": ["approximate"]},
+        "sample_aligned": {"type": "boolean", "const": False},
+    }
+    server.add_tool(Tool("live_audio_capture", "Raw end-of-device-chain passage capture, pre-mixer and untrimmed; approximate timing only. Groups/returns/master overlap; no in-mix or alignment proof. See AGENTS.md.", schema(capture_properties, ["start_beat", "length_beats"]), live_audio_capture))
     def live_audio_capture_in_mix(args):
         from in_mix_capture import capture_in_mix
         from in_mix_qualification import attach_qualification
@@ -339,7 +403,7 @@ def make_server(client: AbletonBridgeClient | None = None) -> StdioMcpServer:
         from audio_analysis import analyze_audio
         return analyze_audio(args)
 
-    server.add_tool(Tool("live_audio_analyze", "Offline WAV/capture loudness: gated LUFS, local levels, sections. File-relative seconds; pre-mixer levels are not in-mix audibility. Requires audio-analysis extra; see AGENTS.md.", schema({
+    analyze_schema = schema({
         "path": {"type": "string", "description": "Local mono/stereo WAV; choose path or manifest_path."},
         "manifest_path": {"type": "string", "description": "Manifest from live_audio_capture."},
         "sections": {"type": "array", "maxItems": 32, "items": schema({
@@ -348,7 +412,9 @@ def make_server(client: AbletonBridgeClient | None = None) -> StdioMcpServer:
             "end_seconds": {"type": "number", "exclusiveMinimum": 0},
         }, ["name", "start_seconds", "end_seconds"])},
         "window_step_seconds": {"type": "number", "exclusiveMinimum": 0, "description": "Local measurement sampling interval; output capped at 120 windows/file."},
-    }), live_audio_analyze))
+    })
+    analyze_schema["oneOf"] = [{"required": ["path"]}, {"required": ["manifest_path"]}]
+    server.add_tool(Tool("live_audio_analyze", "Offline WAV/capture loudness: gated LUFS, local levels, sections. File-relative seconds; pre-mixer levels are not in-mix audibility. Requires audio-analysis extra; see AGENTS.md.", analyze_schema, live_audio_analyze))
     def live_audio_masking(args):
         from audio_masking import analyze_masking
         return analyze_masking(args)
@@ -468,7 +534,16 @@ def make_server(client: AbletonBridgeClient | None = None) -> StdioMcpServer:
         "gains_db": {"type": "object", "additionalProperties": {"type": "number", "minimum": -60, "maximum": 60}},
         **balance_options,
     }, ["manifest_path", "listening_condition"]), live_audio_assess))
-    server.add_tool(Tool("live_visual_capture", VISUAL_CAPTURE_DESCRIPTION, loose_schema(), lambda args: capture_ableton_window(
+    visual_properties = {
+        "output_path": {"type": "string"}, "title_contains": {"type": "string"},
+        "list_only": {"type": "boolean"}, "backend": {"type": "string"},
+        "region": {"type": "string", "description": "full or device-detail; within a verified Ableton window."},
+        "crop": {"type": "array", "items": {"type": "integer"}, "minItems": 4, "maxItems": 4, "description": "[left, top, width, height] within the Ableton window."},
+        "crop_relative_to_region": {"type": "boolean"},
+        "bottom_fraction": {"type": "number", "exclusiveMinimum": 0, "maximum": 1},
+        "max_width": {"type": "integer", "minimum": 1}, "max_height": {"type": "integer", "minimum": 1},
+    }
+    server.add_tool(Tool("live_visual_capture", VISUAL_CAPTURE_DESCRIPTION, schema(visual_properties), lambda args: capture_ableton_window(
         output_path=args.get("output_path"),
         title_contains=args.get("title_contains"),
         list_only=bool(args.get("list_only", False)),
@@ -480,7 +555,7 @@ def make_server(client: AbletonBridgeClient | None = None) -> StdioMcpServer:
         max_width=args.get("max_width"),
         max_height=args.get("max_height"),
     )))
-    server.add_tool(Tool("live_max_console_capture", MAX_CONSOLE_CAPTURE_DESCRIPTION, loose_schema(), lambda args: capture_max_console_window(
+    server.add_tool(Tool("live_max_console_capture", MAX_CONSOLE_CAPTURE_DESCRIPTION, schema({**visual_properties, "display": {"type": "integer", "minimum": 1}}), lambda args: capture_max_console_window(
         output_path=args.get("output_path"),
         title_contains=args.get("title_contains"),
         list_only=bool(args.get("list_only", False)),
@@ -580,6 +655,7 @@ def make_server(client: AbletonBridgeClient | None = None) -> StdioMcpServer:
         if (
             patch_for_recovery is not None
             and params.get("command_file")
+            and not params.get("expected_set_signature")
             and should_write_agent_m4l_recovery_patch(agent_m4l_command(params), patch_for_recovery)
         ):
             write_agent_m4l_recovery_patch(str(params["command_file"]), patch_for_recovery)
@@ -608,10 +684,85 @@ def make_server(client: AbletonBridgeClient | None = None) -> StdioMcpServer:
         if webui is not None:
             response_webui = webui["webui"] if set(webui) == {"webui"} else webui
             result["webui"] = summarize_agent_m4l_webui(response_webui)
+        status = result.get("status") or {}
+        if status.get("error") or status.get("timed_out") or status.get("timeout_reason") or status.get("webui_status") == "read_exhausted":
+            result["outcome"] = "uncertain"
+        elif result.get("load_error"):
+            result["outcome"] = "uncertain" if result.get("load_outcome") != "failed" else ("pending" if result.get("load_retryable") is True else "failed")
+        elif wait_status and status.get("ok") is not False:
+            result["outcome"] = "success"
+        else:
+            result["outcome"] = "pending"  # File delivery alone is not a Max acknowledgement.
         return summarize_agent_m4l_result(result) if compact_result else result
 
-    server.add_tool(Tool("live_agent_m4l_device", AGENT_M4L_TOOL_DESCRIPTION, loose_schema(), agent_m4l_device))
-    server.add_tool(Tool("live_agent_m4l_cleanup", AGENT_M4L_CLEANUP_DESCRIPTION, loose_schema(), forward("agent_m4l_cleanup")))
+    # Open schemas preserve arbitrary Max object attributes, creative state and future
+    # host commands; named controls still remain discoverable to strict clients.
+    web_panel = {"type": "object", "properties": {
+        **{key: {"type": "string"} for key in ("id", "object", "html", "css", "js", "html_path", "path", "url", "html_url", "read_message")},
+        "presentation_rect": {"type": "array"}, "patching_rect": {"type": "array"},
+        "attrs": {"type": "object"}, "reuse": {"type": "boolean"},
+        "assets": {"description": "Map or list of content/text/base64 or source_path/file_path assets."},
+    }}
+    web_schema = {"oneOf": [web_panel, {"type": "array", "items": web_panel}]}
+    binding_schema = {"type": "object", "properties": {
+        **{key: {"type": "string"} for key in ("source", "target", "from", "to", "id", "param", "message", "source_message", "source_set_message")},
+        "args": {}, "source_args": {}, "outlet": {"type": "integer"},
+        **{key: {"type": "number"} for key in ("source_min", "source_max", "target_min", "target_max", "min", "max")},
+        **{key: {"type": "boolean"} for key in ("report", "source_settable", "set_source", "write_source", "scale", "normalized")},
+    }}
+    patch_schema = {"type": "object", "properties": {
+        "objects": {"type": "array", "items": {"type": "object", "properties": {
+            "id": {"type": "string"}, "maxclass": {"type": "string"}, "object": {"type": "string"}, "text": {"type": "string"},
+            "presentation_rect": {"type": "array"}, "patching_rect": {"type": "array"},
+            "box_attrs": {"type": "object"}, "attrs": {"type": "object"}, "args": {"type": "array"}, "messages": {"type": "array"},
+            "ui_bind": binding_schema, "bind": binding_schema,
+            **{key: {"type": "string"} for key in ("set_message", "list_message", "object_message", "json_message")},
+        }}},
+        "connections": {"type": "array", "items": {"type": "object", "properties": {
+            "from": {"type": "string"}, "to": {"type": "string"},
+            "source": {}, "target": {}, "outlet": {"type": "integer"}, "inlet": {"type": "integer"},
+        }}, "description": "Patch cords between generated/static object IDs; endpoints/outlet/inlet follow host format."},
+        "ui_bindings": {"type": "array", "items": binding_schema}, "bindings": {"type": "array", "items": binding_schema},
+        "webui": web_schema,
+        "webuis": web_schema, "device_width": {"type": "number"}, "device_height": {"type": "number"},
+        "web_state_interval_ms": {"type": "number"}, "live_api_observers": {"type": "boolean"},
+    }}
+    value_schema = {"oneOf": [
+        {"type": "object", "description": "Generated IDs mapped to arbitrary scalar/list/object state."},
+        {"type": "array", "items": {"type": "object", "properties": {
+            "id": {"type": "string"}, "value": {}, "message": {"type": "string"}, "args": {},
+            "push_state": {"type": "boolean"}, "echo_state": {"type": "boolean"},
+        }}},
+    ]}
+    m4l_properties = {
+        "patch": patch_schema, "spec": patch_schema,
+        "target_track": ref, "ref": ref,
+        "values": value_schema,
+        "parameters": value_schema,
+        "webui": web_schema, "webuis": web_schema,
+        **mutation_controls,
+    }
+    for key in ("name", "instance_id", "device_name", "role", "id", "command_file", "status_file", "command", "status_detail", "result_detail"):
+        m4l_properties[key] = {"type": "string"}
+    m4l_properties["command"]["description"] = "update/reload, set, status, clear, web_reload; host commands remain free-form."
+    m4l_properties["role"]["description"] = "audio_effect, instrument, midi_effect (host aliases accepted)."
+    for key in ("build", "install", "load", "udp", "write_command_file", "isolated", "prefer_browser_load", "preflight", "preflight_only", "wait_status", "compact_status", "compact_result", "status_state_keys_only", "strict_timeout", "timeout_strict"):
+        m4l_properties[key] = {"type": "boolean"}
+    for key in ("device_width", "devicewidth", "width", "device_height", "deviceheight", "height", "status_timeout", "load_retry_timeout"):
+        m4l_properties[key] = {"type": "number", "minimum": 0}
+    for key in ("status_poll_interval", "load_retry_interval"):
+        m4l_properties[key] = {"type": "number", "minimum": 0}
+    m4l_properties["port"] = {"type": "integer", "minimum": 1, "maximum": 65535}
+    m4l_properties["device_index"] = {"type": "integer"}
+    m4l_properties["status_state_keys"] = {"oneOf": [{"type": "string"}, {"type": "array", "items": {"type": "string"}}]}
+    server.add_tool(Tool("live_agent_m4l_device", AGENT_M4L_TOOL_DESCRIPTION, {"type": "object", "properties": m4l_properties}, agent_m4l_device))
+    server.add_tool(Tool("live_agent_m4l_cleanup", AGENT_M4L_CLEANUP_DESCRIPTION, schema({
+        "delete": {"type": "boolean", "description": "Default false: dry run. Ask before true."},
+        "ref": ref, "target_track": ref, "track_query": {"type": "string"},
+        "name_prefix": {"type": "string"}, "name_contains": {"type": "string"}, "role": {"type": "string"},
+        "limit": {"type": "integer", "minimum": 0}, "max_delete": {"type": "integer", "minimum": 0},
+        **mutation_controls,
+    }), forward("agent_m4l_cleanup")))
     server.add_tool(Tool("live_transport", "Transport status/play/continue/stop; seek.", schema({
         "action": {"type": "string", "enum": ["play", "continue", "stop", "status"]},
         "time": {"type": "number"},
@@ -1143,6 +1294,7 @@ def summarize_agent_m4l_webui(webui: Any) -> Any:
 
 def summarize_agent_m4l_result(result: dict[str, Any]) -> dict[str, Any]:
     keep = (
+        "outcome",
         "method",
         "sent",
         "command",
@@ -1159,6 +1311,8 @@ def summarize_agent_m4l_result(result: dict[str, Any]) -> dict[str, Any]:
         "udp_skipped",
         "triggered",
         "load_error",
+        "load_outcome",
+        "load_retryable",
         "load_retry_attempts",
         "direct",
         "preflight_only",
@@ -1229,10 +1383,13 @@ def _should_retry_agent_m4l_load(params: dict[str, Any], result: dict[str, Any])
         return False
     if not (params.get("target_track") or params.get("ref")):
         return False
-    return result.get("loaded") is False and bool(result.get("load_error"))
+    return (result.get("loaded") is False and bool(result.get("load_error"))
+            and result.get("load_outcome") == "failed" and result.get("load_retryable") is True)
 
 
 def should_handle_agent_m4l_direct(params: dict[str, Any]) -> bool:
+    if params.get("expected_set_signature"):
+        return False  # Set identity must be checked in Live before command delivery.
     if params.get("target_track") or params.get("ref"):
         return False
     command = agent_m4l_command(params)
@@ -1441,6 +1598,9 @@ def retry_agent_m4l_load(bridge: AbletonBridgeClient, params: dict[str, Any], re
         "udp": False,
         "id": result.get("command_id"),
         "timeout": params.get("timeout"),
+        "expected_set_signature": params.get("expected_set_signature"),
+        "strict_timeout": params.get("strict_timeout"),
+        "timeout_strict": params.get("timeout_strict"),
     }
     retry_params = {key: value for key, value in retry_params.items() if value is not None}
     while time.time() < deadline:
@@ -1450,9 +1610,15 @@ def retry_agent_m4l_load(bridge: AbletonBridgeClient, params: dict[str, Any], re
             result["loaded"] = True
             result["track"] = retry.get("track")
             result.pop("load_error", None)
+            result.pop("load_outcome", None)
+            result.pop("load_retryable", None)
             break
         if retry.get("load_error"):
             result["load_error"] = retry["load_error"]
+        result["load_outcome"] = retry.get("load_outcome", "uncertain")
+        result["load_retryable"] = retry.get("load_retryable") is True
+        if not _should_retry_agent_m4l_load(retry_params, retry):
+            break
         if interval <= 0:
             break
         time.sleep(interval)
@@ -1684,6 +1850,24 @@ def _agent_m4l_reload_seen(status: dict[str, Any], command_id: str, expected_eve
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description="Ableton Live MCP server")
+    parser.add_argument("--version", action="store_true", help="Print active installation identity as JSON")
+    parser.add_argument("--transport", choices=("stdio", "streamable-http"), default="stdio")
+    parser.add_argument("--host", choices=("127.0.0.1", "localhost"), default="127.0.0.1")
+    parser.add_argument("--port", type=int, default=8765)
+    args = parser.parse_args()
+    if args.version:
+        print(json.dumps(installation_identity(), ensure_ascii=False))
+        return
+    if args.transport == "streamable-http":
+        from mcp_http import StreamableHttpServer
+        with StreamableHttpServer(make_server(), args.host, args.port) as http:
+            print(f"MCP HTTP listening at http://127.0.0.1:{http.server_port}/mcp", file=sys.stderr)
+            try:
+                http.serve_forever()
+            except KeyboardInterrupt:
+                pass
+        return
     # On Windows, piped stdio defaults to the locale code page (e.g. cp1252),
     # which corrupts every non-ASCII track/clip/device name crossing the MCP
     # boundary, and text-mode stdout frames lines as \r\n. MCP stdio is UTF-8

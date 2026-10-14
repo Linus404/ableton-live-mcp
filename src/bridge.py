@@ -16,7 +16,14 @@ NO_MAIN_THREAD_METHODS = {"bridge_status"}
 
 
 class AbletonBridgeError(RuntimeError):
-    pass
+    def __init__(self, message: str, *, outcome: str = "failed", request_id: int | None = None, method: str | None = None) -> None:
+        super().__init__(message)
+        self.outcome = outcome
+        self.request_id = request_id
+        self.method = method
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"outcome": self.outcome, "request_id": self.request_id, "method": self.method, "message": str(self)}
 
 
 class _BridgeReadTimeout(OSError):
@@ -63,49 +70,51 @@ class AbletonBridgeClient:
             "params": params,
         }
         with self._lock:
-            self._raise_if_client_stall(method, params)
             try:
-                response = self._send(payload)
-            except _BridgeReadTimeout as exc:
-                self._mark_client_stall(method, params)
-                self.close()
-                raise AbletonBridgeError(self._timeout_message(method, params)) from exc
+                self._raise_if_client_stall(method, params)
+            except AbletonBridgeError as exc:
+                exc.request_id = payload["id"]
+                exc.method = method
+                raise
+            # Only connection establishment is safe to retry. Even a failed
+            # sendall may have delivered a complete edit to Live.
+            try:
+                self._socket()
             except OSError:
                 self.close()
                 try:
-                    self._raise_if_client_stall(method, params)
-                    response = self._send(payload)
-                except _BridgeReadTimeout as exc:
-                    self._mark_client_stall(method, params)
-                    self.close()
-                    raise AbletonBridgeError(self._timeout_message(method, params)) from exc
+                    self._socket()
                 except OSError as exc:
                     self.close()
-                    raise AbletonBridgeError(f"Could not connect to Ableton bridge at {self.config.host}:{self.config.port}: {exc}") from exc
-        message = json.loads(response.decode("utf-8"))
-        if self._is_stale_idle_timeout(message, payload["id"]):
-            self.close()
-            with self._lock:
-                try:
-                    self._raise_if_client_stall(method, params)
-                    response = self._send(payload)
-                except _BridgeReadTimeout as exc:
-                    self._mark_client_stall(method, params)
-                    self.close()
-                    raise AbletonBridgeError(self._timeout_message(method, params)) from exc
-                except OSError as exc:
-                    self.close()
-                    raise AbletonBridgeError(f"Could not connect to Ableton bridge at {self.config.host}:{self.config.port}: {exc}") from exc
-            message = json.loads(response.decode("utf-8"))
-        if "error" in message:
-            err = message["error"]
-            detail = err.get("data") if os.environ.get("ABLETON_MCP_TRACEBACK") else ""
-            suffix = f": {detail}" if detail else ""
-            error_message = f"{err.get('code', -32000)} {err.get('message', 'Bridge error')}{suffix}"
-            if self._is_main_thread_timeout_error(error_message):
+                    raise AbletonBridgeError(f"Could not connect to Ableton bridge at {self.config.host}:{self.config.port}: {exc}", request_id=payload["id"], method=method) from exc
+            try:
+                response = self._send(payload)
+                message = json.loads(response.decode("utf-8"))
+                if not isinstance(message, dict) or message.get("jsonrpc") != "2.0" or type(message.get("id")) is not int or message["id"] != payload["id"]:
+                    raise ValueError("Response does not belong to the current Ableton bridge request")
+                if ("result" in message) == ("error" in message) or ("error" in message and not isinstance(message["error"], dict)):
+                    raise ValueError("Invalid Ableton bridge response envelope")
+            except (OSError, ValueError) as exc:
                 self._mark_client_stall(method, params)
-            raise AbletonBridgeError(error_message)
-        return message.get("result")
+                self.close()
+                text = self._timeout_message(method, params) if isinstance(exc, _BridgeReadTimeout) else f"Ableton bridge request {method!r} has uncertain execution status: {exc}. It was not retried automatically."
+                raise AbletonBridgeError(text, outcome="uncertain", request_id=payload["id"], method=method) from exc
+            if "error" in message:
+                err = message["error"]
+                data = err.get("data")
+                detail = str(data)[:4096] if os.environ.get("ABLETON_MCP_TRACEBACK") else ""
+                suffix = f": {detail}" if detail else ""
+                error_message = f"{err.get('code', -32000)} {str(err.get('message', 'Bridge error'))[:4096]}{suffix}"
+                timeout = self._is_main_thread_timeout_error(error_message)
+                if timeout:
+                    self._mark_client_stall(method, params)
+                outcome = data.get("outcome") if isinstance(data, dict) else None
+                if outcome not in {"failed", "pending", "uncertain"}:
+                    # Older scripts cannot prove that an exception happened
+                    # before side effects. A reported error is not a rollback.
+                    outcome = "failed" if "refusing to enqueue" in error_message.lower() else "uncertain"
+                raise AbletonBridgeError(error_message, outcome=outcome, request_id=payload["id"], method=method)
+            return message["result"]
 
     def close(self) -> None:
         if self._sock is not None:
@@ -181,15 +190,6 @@ class AbletonBridgeClient:
         return self._sock
 
     @staticmethod
-    def _is_stale_idle_timeout(message: dict[str, Any], request_id: int) -> bool:
-        if message.get("id") == request_id:
-            return False
-        error = message.get("error")
-        if not isinstance(error, dict):
-            return False
-        return message.get("id") is None and str(error.get("message", "")).lower() == "timed out"
-
-    @staticmethod
     def _is_main_thread_timeout_error(message: str) -> bool:
         text = str(message).lower()
         return "timed out waiting for live main thread" in text or "live main thread is in stall cooldown" in text
@@ -211,7 +211,7 @@ class AbletonBridgeClient:
             except socket.timeout as exc:
                 raise _BridgeReadTimeout("timed out waiting for Ableton bridge response") from exc
             if not chunk:
-                break
+                raise OSError("Connection closed before a complete Ableton bridge response")
             total += len(chunk)
             if max_bytes >= 0 and total > max_bytes:
                 raise OSError(f"Ableton bridge response exceeds {max_bytes} bytes")
@@ -219,8 +219,8 @@ class AbletonBridgeClient:
             if b"\n" in chunk:
                 break
         data = b"".join(chunks)
-        if not data:
-            raise OSError("No response from Ableton bridge")
+        if data.split(b"\n", 1)[1]:
+            raise OSError("Unexpected trailing data after Ableton bridge response")
         return data.split(b"\n", 1)[0]
 
 

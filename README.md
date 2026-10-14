@@ -8,17 +8,139 @@ Things you can use it for: create MIDI clips, insert audio files, general Ableto
 
 Just tell your AI agent (Codex, Claude Code, Cursor, Copilot, Gemini, etc.) to:
 
-`Set up the https://github.com/bschoepke/ableton-live-mcp MCP server for me`
+`Set up the https://github.com/Linus404/ableton-live-mcp MCP server for me`
 
-It should work on Mac and Windows with recent Ableton versions, but I have only tested it on Ableton Live Suite 12.3.8 on macOS Tahoe.
+Current cumulative acceptance includes Ableton Live 12.4.6 on Windows, with
+earlier upstream Live Suite 12.3.8/macOS Tahoe coverage. See
+[RELEASE_ACCEPTANCE.md](RELEASE_ACCEPTANCE.md) for tested scope and limits.
+
+For a reproducible checkout installation (Python 3.10+):
+
+```sh
+python -m venv .venv
+# Activate it: Windows PowerShell .\.venv\Scripts\Activate.ps1
+# macOS shell: source .venv/bin/activate
+python -m pip install -e ".[dev]"
+ableton-live-mcp-install-remote-script
+```
+
+Run the last two commands with the new environment activated; alternatively use
+its explicit Python/CLI paths. Select
+`Ableton_Live_MCP` under Live Settings → Link/Tempo/MIDI → Control Surface.
+Configure your MCP client with the absolute path to that environment's
+`ableton-live-mcp` executable (Windows: `.venv\Scripts\ableton-live-mcp.exe`;
+macOS: `.venv/bin/ableton-live-mcp`), then run `ableton-live-mcp-validate`.
+Require `runtime_current:true` and `live_mutations_safe:true` before Live edits.
+The optional `audio-analysis` extra installs the offline WAV measurement backend.
 
 Back up your Live Set before using this. The MCP can edit your set directly and could corrupt it.
 
 ## How to update
 
-`git pull` this repo or ask your agent to:
+### MCP transports and active installation
 
-`Update the https://github.com/bschoepke/ableton-live-mcp MCP server for me`
+`ableton-live-mcp` defaults to UTF-8 newline-delimited stdio. Clients initialize
+once, send `notifications/initialized`, then discover/call tools. Supported stdio
+protocol revisions are `2024-11-05`, `2025-03-26`, and `2025-06-18`.
+
+Optional dependency-free **Streamable HTTP** runs on loopback:
+
+```sh
+ableton-live-mcp --transport streamable-http --host 127.0.0.1 --port 8765
+```
+
+The endpoint is `http://127.0.0.1:8765/mcp`. `--port 0` selects a free port and
+prints its endpoint to stderr. HTTP supports `2025-03-26` and `2025-06-18`.
+POST JSON with `Content-Type: application/json` (UTF-8) and
+`Accept: application/json, text/event-stream`. Successful initialization returns
+`MCP-Session-Id`; send that header and the negotiated `MCP-Protocol-Version` on
+subsequent requests. An absent version header means `2025-03-26`; mismatching or
+unsupported versions are rejected. Notifications/client responses return 202.
+Ordinary requests return JSON; tool calls supplying `_meta.progressToken` return
+SSE `event: message` frames containing progress notifications and the final
+JSON-RPC response. March supports batches of at most 32 requests/notifications;
+initialize remains a separate request. June rejects batches.
+
+GET returns 405; DELETE terminates the supplied session. Graceful server shutdown
+waits for accepted operations and their cleanup, including deleted sessions still
+settling. There is no legacy
+HTTP+SSE endpoint, event replay/resumption, authentication, or external binding.
+Host and supplied Origin must identify loopback origins. Bodies are limited to
+1 MiB, retained sessions to 32, and active POST handlers to 64. Delete sessions
+when finished; server restart also clears them. This is a same-machine endpoint
+for trusted local clients, not a remote service or a boundary against other
+local processes. All sessions share serialized tool execution.
+
+Cancellation is accepted through a separate POST while a tool is running.
+It is best-effort: an already-running bridge operation settles with its actual
+outcome, without rollback or automatic replay. Disconnecting a JSON/SSE client
+does not cancel an operation. Progress represents actual execution boundaries,
+not an estimated completion percentage.
+
+```sh
+ableton-live-mcp --version
+```
+
+This offline JSON command identifies the active package version, interpreter,
+server/protocol/HTTP/bridge module paths, installed distribution location/version, and source
+fingerprint. The same identity is returned in initialize result
+`_meta["ableton-live-mcp/identity"]`; use it to distinguish a checkout from an
+older globally installed command at the same release version. Release version
+has one source in `src/server.py`, read by the package build. MCP installation
+identity does not establish Live Remote Script freshness or mutation safety.
+
+Update the checkout, reinstall with its environment's
+`python -m pip install -e ".[dev]"`, and compare `ableton-live-mcp --version`
+against your client's initialize identity. Restart the MCP server/client session
+to refresh published tool schemas. If Remote Script files changed, run
+`ableton-live-mcp-install-remote-script --force`, preserve your Live work, and
+authorize a Control Surface reload before validation. If loaded fingerprints
+remain stale after reload, a separately authorized Live restart is required.
+Generated M4L host changes additionally need `ableton-live-mcp-sync-m4l-host`
+and replacement/reload of stale loaded hosts; Remote installation alone does not
+refresh their companion JS.
+Code-hash-scoped in-mix calibration certificates must be recalibrated after a
+qualification implementation update; installed-wheel path fixes do not authorize
+carrying older certificates forward. Historical retained offline evidence remains
+historical evidence.
+
+### Troubleshooting
+
+- Wrong executable or missing arguments in a tool schema: compare offline
+  `--version` module paths and initialize identity, then refresh the client's MCP
+  session. Global PATH may point to another installation.
+- `live_main_thread_hung`: stop sending edits; use socket-only
+  `live_bridge_status`, inspect Live for a modal or renderer stall, and obtain
+  authorization before reload/restart. A responsive socket is not a responsive
+  Live main thread.
+- Sent-call timeout/lost response: execution may be uncertain. Inspect retained
+  outcomes/current state before taking another action; never replay an edit
+  merely because its reply was lost.
+- A blank Ableton capture is invalid visual evidence. Wake/unlock the display
+  or resolve capture permission before claiming generated UI validation.
+- Workflow recovery refuses missing/changed original objects or touched-value
+  conflicts. History is bounded and process-local; restarting cannot recover it.
+
+## Everyday workflows, snapshots and recovery
+
+`live_workflow` plans or applies bounded typed track, scene, Session clip,
+Arrangement, routing and mixer operations through one existing bridge callback.
+Targets are pinned current-set objects; explicit preconditions, applied prefixes,
+skipped suffixes and uncertain outcomes remain visible. Optional Live undo
+grouping is a boundary, not atomic rollback.
+
+`live_snapshot` captures declared metadata coverage; `live_snapshot_diff` compares
+retained snapshots by object identity. `live_workflow_history` lists/inspects
+bounded process-local history and explicitly attempts conditional compensation
+for verified reversible property/mixer/routing edits. History is lost on restart
+or eviction; note contents, deleted material and arbitrary execution are not
+reconstructed from metadata. Recovery refuses invalid identity, missing targets
+and touched-value conflicts before editing.
+
+See [WORKFLOWS.md](WORKFLOWS.md) for schemas, examples, native units, undo/recovery
+limits and failure handling. Physical acceptance scope is retained in
+[ORCHESTRATION_PHASE_3_HANDOFF.md](ORCHESTRATION_PHASE_3_HANDOFF.md). General LOM,
+M4L and qualified audio tools retain their existing contracts.
 
 ## Demos
 Here are a couple examples of live sets made from scratch with Codex in just a few minutes, along with their prompts. After it makes something, you can ask for follow up changes.

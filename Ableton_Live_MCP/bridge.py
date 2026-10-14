@@ -93,6 +93,24 @@ class _EncodedResult(list):
     pass
 
 
+class _OperationError(RuntimeError):
+    def __init__(self, message, outcome):
+        RuntimeError.__init__(self, message)
+        self.outcome = outcome
+
+
+def _operation_outcome(method, result):
+    if method == "batch" and isinstance(result, list):
+        outcomes = [item.get("outcome", "success" if item.get("ok") else "uncertain") for item in result]
+        return next((outcome for outcome in ("uncertain", "failed", "pending") if outcome in outcomes), "success")
+    if method == "agent_m4l_device" and isinstance(result, dict):
+        if result.get("load_error"):
+            return result.get("load_outcome", "uncertain")
+        if result.get("command_file_written") or result.get("sent"):
+            return "pending"
+    return "success"
+
+
 def _temp_file(name):
     root = os.environ.get("ABLETON_MCP_STATE_DIR") or os.path.join(os.path.expanduser("~"), ".ableton-live-mcp")
     try:
@@ -157,6 +175,7 @@ class AbletonLiveMCP(ControlSurface):
                     self.log_message("Ableton_Live_MCP accept error: %s" % traceback.format_exc())
 
     def _handle_client(self, client):
+        request = None
         try:
             client.settimeout(CLIENT_TIMEOUT)
             buffer = b""
@@ -165,6 +184,8 @@ class AbletonLiveMCP(ControlSurface):
                 if not data:
                     break
                 request = json.loads(data.decode("utf-8"))
+                if not isinstance(request, dict):
+                    raise ValueError("Request must be a JSON object")
                 acquired = False
                 if request.get("method") == "bridge_status":
                     response = self._dispatch(request)
@@ -177,12 +198,12 @@ class AbletonLiveMCP(ControlSurface):
                             self._handler_slots.release()
                             acquired = False
                     else:
-                        response = {"jsonrpc": "2.0", "id": request.get("id"), "error": {"code": -32000, "message": "Too many concurrent Ableton MCP requests"}}
+                        response = {"jsonrpc": "2.0", "id": request.get("id"), "error": {"code": -32000, "message": "Too many concurrent Ableton MCP requests", "data": {"outcome": "failed"}}}
                 client.sendall((json.dumps(response, separators=(",", ":")) + "\n").encode("utf-8"))
         except socket.timeout:
             pass
         except Exception as exc:
-            err = {"jsonrpc": "2.0", "id": None, "error": {"code": -32000, "message": str(exc)}}
+            err = {"jsonrpc": "2.0", "id": request.get("id") if isinstance(request, dict) else None, "error": {"code": -32000, "message": str(exc)[:4096], "data": {"outcome": "uncertain" if request is not None else "failed"}}}
             try:
                 client.sendall((json.dumps(err, separators=(",", ":")) + "\n").encode("utf-8"))
             except Exception:
@@ -213,7 +234,9 @@ class AbletonLiveMCP(ControlSurface):
         if b"\n" in data:
             line, remainder = data.split(b"\n", 1)
             return line, remainder
-        return data, b""
+        if data:
+            raise ValueError("Connection closed before a complete request")
+        return b"", b""
 
     def _dispatch(self, request):
         req_id = request.get("id")
@@ -233,11 +256,12 @@ class AbletonLiveMCP(ControlSurface):
                 # null. (Batch sub-ops are already wrapped in _rpc_batch and do not
                 # pass through here, so they are unaffected.)
                 result = {"ok": True, "result": None}
-            return {"jsonrpc": "2.0", "id": req_id, "result": result}
+            outcome = _operation_outcome(method, result)
+            return {"jsonrpc": "2.0", "id": req_id, "result": result, "outcome": outcome}
         except Exception as exc:
-            error = {"code": -32000, "message": str(exc)}
+            error = {"code": -32000, "message": str(exc)[:4096], "data": {"outcome": getattr(exc, "outcome", "uncertain")}}
             if params.get("include_traceback"):
-                error["data"] = traceback.format_exc()
+                error["data"]["traceback"] = traceback.format_exc()[-4096:]
             return {"jsonrpc": "2.0", "id": req_id, "error": error}
 
     def _run_on_main(self, method, params):
@@ -253,14 +277,16 @@ class AbletonLiveMCP(ControlSurface):
         result = {"value": None, "error": None}
         abandoned = {"value": False}
         started = {"value": False}
+        state_lock = threading.Lock()
 
         def invoke():
-            if abandoned["value"]:
-                done.set()
-                self._release_main_thread_request_gate(gate_released)
-                return
-            try:
+            with state_lock:
+                if abandoned["value"]:
+                    done.set()
+                    self._release_main_thread_request_gate(gate_released)
+                    return
                 started["value"] = True
+            try:
                 self._check_expected_set_signature(params)
                 value = getattr(self, "_rpc_" + method)(params)
                 if isinstance(value, _EncodedResult):
@@ -275,17 +301,21 @@ class AbletonLiveMCP(ControlSurface):
                 self._release_main_thread_request_gate(gate_released)
 
         try:
-            self.schedule_message(0, invoke)
+            # Framework subtracts one outside update_display; zero creates a
+            # negative DelayTask and adds an unnecessary extra display tick.
+            self.schedule_message(1, invoke)
         except Exception:
             self._release_main_thread_request_gate(gate_released)
             raise
         timeout = self._main_thread_timeout(params)
         if not done.wait(timeout):
-            abandoned["value"] = True
-            self._mark_main_thread_timeout(method, params)
-            if not started["value"]:
-                self._release_main_thread_request_gate(gate_released)
-            raise RuntimeError("Timed out waiting for Live main thread during %s after %.3gs" % (method, timeout))
+            with state_lock:
+                abandoned["value"] = True
+                self._mark_main_thread_timeout(method, params)
+                if not started["value"]:
+                    self._release_main_thread_request_gate(gate_released)
+                outcome = "uncertain" if started["value"] else "failed"
+            raise _OperationError("Timed out waiting for Live main thread during %s after %.3gs" % (method, timeout), outcome)
         if result["error"]:
             exc_type, exc, tb = result["error"]
             raise exc.with_traceback(tb)
@@ -305,6 +335,7 @@ class AbletonLiveMCP(ControlSurface):
             "stall_cooldown_remaining": max(0.0, stall_until - now),
             "in_flight_method": busy_method,
             "in_flight_timed_out": bool(getattr(self, "_main_thread_busy_timed_out", False)),
+            "outcome": "uncertain" if busy_method and getattr(self, "_main_thread_busy_timed_out", False) else "pending" if busy_method else "idle",
         }
         if busy_method and busy_since:
             main_thread["in_flight_age"] = max(0.0, now - busy_since)
@@ -326,10 +357,10 @@ class AbletonLiveMCP(ControlSurface):
         remaining = getattr(self, "_main_thread_stall_until", 0.0) - time.time()
         if remaining > 0:
             previous = getattr(self, "_main_thread_last_timeout_method", None) or "unknown"
-            raise RuntimeError(
+            raise _OperationError(
                 "Live main thread is in stall cooldown after %s timed out; refusing to enqueue %s for %.1fs. "
                 "Use live_bridge_status for socket-thread health, wait for cooldown, or restart/reload Live before sending mutations."
-                % (previous, method, remaining)
+                % (previous, method, remaining), "failed"
             )
 
     def _ensure_main_thread_request_gate(self):
@@ -350,10 +381,10 @@ class AbletonLiveMCP(ControlSurface):
         busy_since = getattr(self, "_main_thread_busy_since", 0.0)
         busy_for = max(0.0, time.time() - busy_since) if busy_since else 0.0
         suffix = " after that request already timed out" if getattr(self, "_main_thread_busy_timed_out", False) else ""
-        raise RuntimeError(
+        raise _OperationError(
             "Live main-thread request already in flight (%s for %.1fs%s); refusing to enqueue %s. "
             "Use live_bridge_status for socket-thread health, then recover or restart/reload Live before sending mutations."
-            % (busy_method, busy_for, suffix, method)
+            % (busy_method, busy_for, suffix, method), "failed"
         )
 
     def _release_main_thread_request_gate(self, released):
@@ -1112,6 +1143,8 @@ class AbletonLiveMCP(ControlSurface):
 
         loaded = False
         load_error = None
+        load_outcome = None
+        load_retryable = False
         target_track = None
         if params.get("target_track"):
             target_track = self._resolve(params.get("target_track"))
@@ -1123,6 +1156,8 @@ class AbletonLiveMCP(ControlSurface):
                     loaded = self._load_agent_m4l_device(target_track, device_name, role, params)
             except Exception as exc:
                 load_error = str(exc)
+                load_outcome = getattr(exc, "outcome", "uncertain")
+                load_retryable = bool(getattr(exc, "load_retryable", False))
         triggered = False
         if target_track is not None:
             target_device = self._find_track_device(target_track, device_name, role)
@@ -1147,6 +1182,8 @@ class AbletonLiveMCP(ControlSurface):
         }
         if load_error:
             result["load_error"] = load_error
+            result["load_outcome"] = load_outcome
+            result["load_retryable"] = load_retryable
         if target_track is not None:
             result["track"] = self._track_summary(target_track, None, 0, 16, 0)
         return result
@@ -1231,34 +1268,32 @@ class AbletonLiveMCP(ControlSurface):
         return result
 
     def _load_agent_m4l_device(self, target_track, device_name, role, params):
-        errors = []
         if hasattr(target_track, "insert_device") and not params.get("prefer_browser_load"):
-            before_ids = set(self._object_id(device) for device in target_track.devices) if params.get("isolated") else None
             try:
                 self._insert_track_device(target_track, device_name, role, params)
                 return True
             except Exception as exc:
-                if before_ids is not None and any(self._object_id(device) not in before_ids for device in target_track.devices):
-                    raise RuntimeError("Isolated tap insertion changed the device chain before failing: %s" % exc)
-                errors.append(str(exc))
+                raise _OperationError("Device insertion has uncertain execution status; no browser fallback was attempted: %s" % exc, "uncertain")
         item = self._find_browser_item_named(device_name)
         if item is not None:
             before_devices = list(getattr(target_track, "devices", []))
             before_ids = set([self._object_id(device) for device in before_devices])
             self.song().view.selected_track = target_track
-            Live.Application.get_application().browser.load_item(item)
-            self._rename_new_track_device(target_track, before_ids, device_name)
+            try:
+                Live.Application.get_application().browser.load_item(item)
+                self._rename_new_track_device(target_track, before_ids, device_name)
+            except Exception as exc:
+                raise _OperationError("Browser device loading has uncertain execution status: %s" % exc, "uncertain")
             return True
         if hasattr(target_track, "insert_device") and params.get("prefer_browser_load"):
             try:
                 self._insert_track_device(target_track, device_name, role, params)
                 return True
             except Exception as exc:
-                errors.append(str(exc))
-        detail = "; ".join([error for error in errors if error])
-        if detail:
-            raise RuntimeError(detail)
-        raise KeyError("Could not find %s in the Live browser; build/install it with live_agent_m4l_device first or reload Live's browser" % device_name)
+                raise _OperationError("Device insertion has uncertain execution status: %s" % exc, "uncertain")
+        error = _OperationError("Could not find %s in the Live browser; build/install it with live_agent_m4l_device first or reload Live's browser" % device_name, "failed")
+        error.load_retryable = True
+        raise error
 
     def _insert_track_device(self, target_track, device_name, role, params):
         before_devices = list(getattr(target_track, "devices", []))
@@ -2009,18 +2044,33 @@ class AbletonLiveMCP(ControlSurface):
             if params.get(name) is not None:
                 inherited[name] = params.get(name)
         for index, op in enumerate(params.get("operations") or []):
-            method = op.get("method")
-            op_params = op.get("params") or {}
-            for name, value in inherited.items():
-                if op_params.get(name) is None:
-                    op_params[name] = value
+            method = None
+            attempted = False
             try:
-                value = getattr(self, "_rpc_" + method)(op_params)
-                results.append({"ok": True, "result": self._encode(value, self._encode_options(op_params))})
+                method = op.get("method")
+                op_params = dict(op.get("params") or {})
+                for name, value in inherited.items():
+                    if op_params.get(name) is None:
+                        op_params[name] = value
+                handler = getattr(self, "_rpc_" + method)
+                self._check_expected_set_signature(op_params)
+                attempted = True
+                value = handler(op_params)
+                outcome = _operation_outcome(method, value)
+                if isinstance(value, _EncodedResult):
+                    encoded = value
+                else:
+                    encoded = self._encode(value, self._encode_options(op_params))
+                item = {"ok": outcome in ("success", "pending"), "outcome": outcome, "result": encoded}
+                if not item["ok"]:
+                    item.update({"index": index, "method": method, "error": "Nested batch did not complete successfully"})
+                results.append(item)
+                if not item["ok"] and not continue_on_error:
+                    break
             except Exception as exc:
-                item = {"ok": False, "index": index, "method": method, "error": str(exc)}
+                item = {"ok": False, "outcome": getattr(exc, "outcome", "uncertain" if attempted else "failed"), "index": index, "method": method, "error": str(exc)[:4096]}
                 if params.get("include_traceback"):
-                    item["traceback"] = traceback.format_exc()
+                    item["traceback"] = traceback.format_exc()[-4096:]
                 results.append(item)
                 if not continue_on_error:
                     break
